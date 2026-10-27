@@ -61,7 +61,11 @@ impl RedcrabApp {
             window,
             |this, workspace, event, window, cx| match event {
                 WorkspaceEvent::Disconnect => {
-                    let config = workspace.read(cx).client().config().clone();
+                    // The form never shows a saved password again.
+                    let config = ConnectionConfig {
+                        password: None,
+                        ..workspace.read(cx).client().config().clone()
+                    };
                     this.show_connect(config, window, cx);
                 }
             },

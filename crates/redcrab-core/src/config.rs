@@ -9,6 +9,9 @@ pub struct ConnectionConfig {
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
+    /// Never written to disk; saved passwords live in the credential store
+    /// (see [`crate::store`]). Still read, so old files can be migrated.
+    #[serde(skip_serializing)]
     pub password: Option<String>,
     pub db: u32,
     /// Splits key names into folders in the key tree.
@@ -119,5 +122,23 @@ mod tests {
         let c = ConnectionConfig::parse_url("redis://:pw@h:1/").unwrap();
         assert_eq!((c.username, c.password.as_deref()), (None, Some("pw")));
         assert!(ConnectionConfig::parse_url("h:notaport").is_err());
+    }
+
+    #[test]
+    fn never_serializes_passwords() {
+        let config = ConnectionConfig {
+            password: Some("s3cret".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            !json.contains("s3cret") && !json.contains("password"),
+            "{json}"
+        );
+
+        // Files written by older versions still load, so they can be migrated.
+        let old: ConnectionConfig =
+            serde_json::from_str(r#"{"name":"x","password":"s3cret"}"#).unwrap();
+        assert_eq!(old.password.as_deref(), Some("s3cret"));
     }
 }

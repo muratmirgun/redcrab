@@ -21,6 +21,14 @@ keyspaces with millions of keys while using a fraction of the memory.
 - Collections are paged (`HSCAN`, `SSCAN`, `LRANGE`, `ZRANGE`, `XRANGE`), so opening
   a hash with a million fields does not block anything.
 
+## Security
+
+Saved connections live in `connections.json` in the platform config directory, without
+passwords. Passwords go to the system credential store (the macOS Keychain, Windows
+Credential Manager, or the Secret Service on Linux) under the service `redcrab`, and are
+saved only after they have worked once. Leave the password field empty to use the saved one;
+removing a connection removes its password too.
+
 ## Layout
 
 | Crate | What |

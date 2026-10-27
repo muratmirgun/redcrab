@@ -17,6 +17,13 @@ use gpui_kit::{
 };
 use redcrab_core::{Client, ConnectionConfig, format, store};
 
+#[cfg(target_os = "macos")]
+const KEYCHAIN_NOTE: &str =
+    "Passwords are kept in the macOS Keychain, never in redcrab's config file.";
+#[cfg(not(target_os = "macos"))]
+const KEYCHAIN_NOTE: &str =
+    "Passwords are kept in the system credential store, never in redcrab's config file.";
+
 pub enum ConnectEvent {
     Connected(Client),
 }
@@ -60,7 +67,11 @@ impl ConnectView {
         let port = input("6379", window, cx);
         let db = input("0", window, cx);
         let username = input("default", window, cx);
-        let password = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Leave empty to use the saved one")
+        });
         let separator = input(":", window, cx);
 
         let subscriptions = [&name, &host, &port, &db, &username, &password, &separator]
@@ -166,6 +177,11 @@ impl ConnectView {
     }
 
     fn remember(&mut self, config: &ConnectionConfig) {
+        // The list never holds passwords; they go to the credential store.
+        let config = &ConnectionConfig {
+            password: None,
+            ..config.clone()
+        };
         match self.saved.iter().position(|c| c.name == config.name) {
             Some(ix) => {
                 self.saved[ix] = config.clone();
@@ -209,16 +225,49 @@ impl ConnectView {
         self.error = None;
         cx.notify();
 
+        let typed_password = config.password.clone();
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut keychain_error = None;
             let result = async {
+                let mut config = config;
+                let name = config.name.clone();
+                if config.password.is_none() {
+                    // Keychain calls may block on a system prompt.
+                    let lookup = name.clone();
+                    config.password = cx
+                        .background_executor()
+                        .spawn(async move { store::load_password(&lookup) })
+                        .await
+                        .unwrap_or_else(|err| {
+                            tracing::warn!("could not read the saved password: {err:#}");
+                            None
+                        });
+                }
                 let client = Client::connect(config).await?;
                 let latency = client.ping().await?;
                 let info = client.server_info().await?;
+                // A typed password is saved only once it has worked.
+                if let (false, Some(password)) = (test_only, typed_password) {
+                    let saved = cx
+                        .background_executor()
+                        .spawn(async move { store::save_password(&name, &password) })
+                        .await;
+                    keychain_error = saved.err().map(|err| format!("{err:#}"));
+                }
                 anyhow::Ok((client, latency, info))
             }
             .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = false;
+                if let Some(err) = keychain_error {
+                    window.push_notification(
+                        Notification::warning(format!(
+                            "Connected, but the password could not be saved: {err}"
+                        ))
+                        .title("Keychain"),
+                        cx,
+                    );
+                }
                 match result {
                     Ok((client, latency, info)) if test_only => {
                         window.push_notification(
@@ -263,7 +312,14 @@ impl ConnectView {
     }
 
     fn forget(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.saved.remove(ix);
+        let name = self.saved.remove(ix).name;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = store::delete_password(&name) {
+                    tracing::warn!("could not remove the saved password of {name:?}: {err:#}");
+                }
+            })
+            .detach();
         if let Err(err) = store::save_connections(&self.saved) {
             tracing::warn!("could not save connections: {err:#}");
         }
@@ -433,6 +489,13 @@ impl Render for ConnectView {
                             .child(Label::new("Password").text_sm())
                             .child(Input::new(&self.password).mask_toggle()),
                     ),
+            )
+            .child(
+                div()
+                    .mt(px(-8.))
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(KEYCHAIN_NOTE),
             )
             .child(
                 h_flex()
