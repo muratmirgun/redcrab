@@ -1,0 +1,33 @@
+# sshd for the redcrab test environment. Not hardened: it exists so tests can
+# open SSH tunnels with a password or a key.
+
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+LogLevel INFO
+
+AllowUsers tunnel
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+
+AllowTcpForwarding yes
+GatewayPorts no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+
+UseDNS no
+LoginGraceTime 30
+ClientAliveInterval 30
+# Tests connect in parallel, all from the same address (the Docker gateway).
+# Without these, a burst of connections is dropped, and the failed logins that
+# tests make on purpose would get that address locked out for a while.
+MaxStartups 200:30:400
+PerSourcePenalties no
+PerSourceMaxStartups none
+
+Subsystem sftp internal-sftp

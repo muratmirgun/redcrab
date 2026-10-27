@@ -1,0 +1,196 @@
+# Throwaway Redis servers for redcrab's integration tests (REDCRAB_IT=1).
+# Drive it with scripts/test-env.sh {up|down|status|env}: it generates the
+# certificates and SSH keys in .generated/ that the services below mount.
+#
+# Every port is published on 127.0.0.1 only, and every server listens on the
+# same port inside its container as on the host. Cluster and Sentinel need that:
+# they tell clients where to go (MOVED, get-master-addr-by-name), and those
+# addresses must work from the host. Nothing here persists: /data is a tmpfs,
+# so every container start begins with an empty server.
+
+name: redcrab-it
+
+# Shared health check timing. During start_period, checks run every second and
+# failures do not count, so `docker compose up --wait` returns as soon as a
+# service is really usable; afterwards three failures in a row mark it unhealthy.
+x-health: &health
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 120s
+  start_interval: 1s
+
+x-redis: &redis
+  image: redis:8-alpine
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 5s
+  tmpfs: [/data]
+
+services:
+  standalone:
+    <<: *redis
+    container_name: redcrab-it-standalone
+    command: [redis-server, --port, "6400", --save, "", --protected-mode, "no"]
+    ports: ["127.0.0.1:6400:6400"]
+    healthcheck:
+      <<: *health
+      test: [CMD-SHELL, "redis-cli -p 6400 ping | grep -q PONG"]
+
+  # `requirepass` protects the default user; `app` may only touch app:* keys
+  # (and app:* channels) and has no @dangerous commands (KEYS, FLUSHALL, INFO,
+  # CONFIG, ...).
+  auth:
+    <<: *redis
+    container_name: redcrab-it-auth
+    command:
+      - redis-server
+      - --port
+      - "6401"
+      - --save
+      - ""
+      - --protected-mode
+      - "no"
+      - --requirepass
+      - rootpass
+      - --user
+      - app
+      - "on"
+      - ">apppass"
+      - "~app:*"
+      - "&app:*"
+      - "+@all"
+      - "-@dangerous"
+    ports: ["127.0.0.1:6401:6401"]
+    healthcheck:
+      <<: *health
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli -p 6401 --user default --pass rootpass --no-auth-warning ping | grep -q PONG &&
+          redis-cli -p 6401 --user app --pass apppass --no-auth-warning ping | grep -q PONG
+
+  # TLS only (no plain port). A client certificate is checked when one is sent
+  # but not required.
+  tls:
+    <<: *redis
+    container_name: redcrab-it-tls
+    command:
+      - redis-server
+      - --port
+      - "0"
+      - --tls-port
+      - "6402"
+      - --tls-cert-file
+      - /certs/server.crt
+      - --tls-key-file
+      - /certs/server.key
+      - --tls-ca-cert-file
+      - /certs/ca.crt
+      - --tls-auth-clients
+      - optional
+      - --save
+      - ""
+      - --protected-mode
+      - "no"
+    volumes: ["./.generated:/certs:ro"]
+    ports: ["127.0.0.1:6402:6402"]
+    healthcheck:
+      <<: *health
+      test: [CMD-SHELL, "redis-cli -p 6402 --tls --cacert /certs/ca.crt ping | grep -q PONG"]
+
+  # TLS only, and the handshake fails without a client certificate signed by
+  # the test CA.
+  tls-mtls:
+    <<: *redis
+    container_name: redcrab-it-tls-mtls
+    command:
+      - redis-server
+      - --port
+      - "0"
+      - --tls-port
+      - "6403"
+      - --tls-cert-file
+      - /certs/server.crt
+      - --tls-key-file
+      - /certs/server.key
+      - --tls-ca-cert-file
+      - /certs/ca.crt
+      - --tls-auth-clients
+      - "yes"
+      - --save
+      - ""
+      - --protected-mode
+      - "no"
+    volumes: ["./.generated:/certs:ro"]
+    ports: ["127.0.0.1:6403:6403"]
+    healthcheck:
+      <<: *health
+      test:
+        - CMD-SHELL
+        - >-
+          redis-cli -p 6403 --tls --cacert /certs/ca.crt
+          --cert /certs/client.crt --key /certs/client.key ping | grep -q PONG
+
+  # Six redis-server processes (7000-7005) in one container, 3 masters with
+  # one replica each, all announcing 127.0.0.1. See redis/cluster.sh.
+  cluster:
+    <<: *redis
+    container_name: redcrab-it-cluster
+    entrypoint: [sh, /redcrab/cluster.sh]
+    command: []
+    volumes: ["./redis:/redcrab:ro"]
+    ports: ["127.0.0.1:7000-7005:7000-7005"]
+    healthcheck:
+      <<: *health
+      test: [CMD, sh, /redcrab/cluster-health.sh]
+
+  # Master 6410, replica 6411 and one Sentinel (26410, quorum 1) watching the
+  # master as `mymaster`, all announcing 127.0.0.1. See redis/sentinel.sh.
+  sentinel:
+    <<: *redis
+    container_name: redcrab-it-sentinel
+    entrypoint: [sh, /redcrab/sentinel.sh]
+    command: []
+    volumes: ["./redis:/redcrab:ro"]
+    ports:
+      - "127.0.0.1:6410:6410"
+      - "127.0.0.1:6411:6411"
+      - "127.0.0.1:26410:26410"
+    healthcheck:
+      <<: *health
+      test: [CMD, sh, /redcrab/sentinel-health.sh]
+
+  # Reachable only through the SSH server: it sits alone on an internal network
+  # with no published port.
+  ssh-redis:
+    <<: *redis
+    container_name: redcrab-it-ssh-redis
+    command: [redis-server, --save, "", --protected-mode, "no"]
+    networks: [ssh-private]
+    healthcheck:
+      <<: *health
+      test: [CMD-SHELL, "redis-cli ping | grep -q PONG"]
+
+  # OpenSSH server: user `tunnel`, password `tunnelpass` or the generated key
+  # (.generated/id_ed25519), TCP forwarding allowed. The health check logs in
+  # with the key and forwards a PING to ssh-redis:6379.
+  ssh:
+    build: ./ssh
+    container_name: redcrab-it-ssh
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 5s
+    volumes: ["./.generated:/generated:ro"]
+    ports: ["127.0.0.1:2222:22"]
+    networks: [default, ssh-private]
+    depends_on:
+      ssh-redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: [CMD, sh, /usr/local/bin/healthcheck.sh]
+
+networks:
+  ssh-private:
+    internal: true
