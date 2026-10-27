@@ -21,6 +21,19 @@ keyspaces with millions of keys while using a fraction of the memory.
 - Collections are paged (`HSCAN`, `SSCAN`, `LRANGE`, `ZRANGE`, `XRANGE`), so opening
   a hash with a million fields does not block anything.
 
+## TLS
+
+Turn on **Use TLS** in the connection form, or connect with a `rediss://` URL. By default
+the server is verified against the system's trusted certificates; a CA file can be given
+instead, plus a client certificate and key for servers that require mutual TLS. **Accept
+untrusted certificates** (`rediss://host#insecure`) skips verification and is meant only for
+self-signed development servers.
+
+```sh
+cargo run -p redcrab-core --example ping -- rediss://host:6380 --ca ca.crt
+cargo run -p redcrab-gui -- rediss://default:password@host:6380/0
+```
+
 ## Security
 
 Saved connections live in `connections.json` in the platform config directory, without

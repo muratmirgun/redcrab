@@ -7,7 +7,16 @@ use gpui_kit::{AssetSource, Result, SharedString, assets::Assets};
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        Trash, Key, Database, Terminal, Clock, Server, Unplug, Braces
+        Trash,
+        Key,
+        Database,
+        Terminal,
+        Clock,
+        Server,
+        Unplug,
+        Braces,
+        Lock,
+        ShieldAlert
     ]
 );
 

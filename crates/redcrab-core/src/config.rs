@@ -1,5 +1,7 @@
-use anyhow::Result;
-use redis::{ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context as _, Result, bail};
+use redis::{ConnectionAddr, IntoConnectionInfo, RedisConnectionInfo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +18,50 @@ pub struct ConnectionConfig {
     pub db: u32,
     /// Splits key names into folders in the key tree.
     pub separator: char,
+    /// `None` connects over plain TCP.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    /// Accept any server certificate. Only for self-signed development
+    /// servers: it gives up protection against interception.
+    pub insecure: bool,
+    /// PEM file with the CA to trust instead of the system roots.
+    pub ca_file: Option<PathBuf>,
+    /// PEM client certificate and key, for servers that require mutual TLS.
+    pub client_cert_file: Option<PathBuf>,
+    pub client_key_file: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    fn certificates(&self) -> Result<Option<redis::TlsCertificates>> {
+        let read = |path: &Path, what: &str| {
+            std::fs::read(path)
+                .with_context(|| format!("could not read the {what} {}", path.display()))
+        };
+        let client_tls = match (&self.client_cert_file, &self.client_key_file) {
+            (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {
+                client_cert: read(cert, "client certificate")?,
+                client_key: read(key, "client key")?,
+            }),
+            (None, None) => None,
+            _ => bail!("mutual TLS needs both a client certificate and a client key"),
+        };
+        let root_cert = self
+            .ca_file
+            .as_deref()
+            .map(|p| read(p, "CA certificate"))
+            .transpose()?;
+        Ok(
+            (client_tls.is_some() || root_cert.is_some()).then_some(redis::TlsCertificates {
+                client_tls,
+                root_cert,
+            }),
+        )
+    }
 }
 
 impl Default for ConnectionConfig {
@@ -28,14 +74,34 @@ impl Default for ConnectionConfig {
             password: None,
             db: 0,
             separator: ':',
+            tls: None,
         }
     }
 }
 
 impl ConnectionConfig {
-    /// Parses `[redis://][user[:password]@]host[:port][/db]`.
+    /// Parses `[redis[s]://][user[:password]@]host[:port][/db][#insecure]`.
+    /// `rediss://` means TLS, and `#insecure` skips certificate checks, as in
+    /// redis-cli and redis-rs.
     pub fn parse_url(url: &str) -> Result<Self> {
-        let rest = url.strip_prefix("redis://").unwrap_or(url);
+        let (rest, insecure) = match url.split_once('#') {
+            Some((rest, "insecure")) => (rest, true),
+            Some((_, other)) => bail!("unsupported URL fragment #{other}; only #insecure is known"),
+            None => (url, false),
+        };
+        let (rest, tls) = match rest.strip_prefix("rediss://") {
+            Some(rest) => (
+                rest,
+                Some(TlsConfig {
+                    insecure,
+                    ..Default::default()
+                }),
+            ),
+            None => {
+                anyhow::ensure!(!insecure, "#insecure only applies to rediss:// URLs");
+                (rest.strip_prefix("redis://").unwrap_or(rest), None)
+            }
+        };
         let (auth, rest) = match rest.rsplit_once('@') {
             Some((auth, rest)) => (Some(auth), rest),
             None => (None, rest),
@@ -64,6 +130,7 @@ impl ConnectionConfig {
             username: owned(username),
             password: owned(password),
             db,
+            tls,
             ..Self::default()
         })
     }
@@ -81,7 +148,8 @@ impl ConnectionConfig {
         }
     }
 
-    pub(crate) fn connection_info(&self) -> Result<ConnectionInfo> {
+    /// Builds the redis-rs client, reading any TLS certificate files.
+    pub(crate) fn client(&self) -> Result<redis::Client> {
         let mut redis = RedisConnectionInfo::default()
             .set_db(self.db.into())
             .set_lib_name("redcrab", env!("CARGO_PKG_VERSION"));
@@ -91,10 +159,36 @@ impl ConnectionConfig {
         if let Some(password) = self.password.as_deref().filter(|p| !p.is_empty()) {
             redis = redis.set_password(password);
         }
-        Ok(ConnectionAddr::Tcp(self.host.clone(), self.port)
-            .into_connection_info()?
-            .set_redis_settings(redis))
+        let addr = match &self.tls {
+            None => ConnectionAddr::Tcp(self.host.clone(), self.port),
+            Some(tls) => {
+                install_crypto_provider();
+                ConnectionAddr::TcpTls {
+                    host: self.host.clone(),
+                    port: self.port,
+                    insecure: tls.insecure,
+                    tls_params: None,
+                }
+            }
+        };
+        let info = addr.into_connection_info()?.set_redis_settings(redis);
+        let certificates = self
+            .tls
+            .as_ref()
+            .map(TlsConfig::certificates)
+            .transpose()?
+            .flatten();
+        Ok(match certificates {
+            Some(certificates) => redis::Client::build_with_tls(info, certificates)?,
+            None => redis::Client::open(info)?,
+        })
     }
+}
+
+/// rustls needs a process-wide crypto provider when the dependency graph does
+/// not settle on exactly one. Installing one twice is harmless.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[cfg(test)]
@@ -122,6 +216,27 @@ mod tests {
         let c = ConnectionConfig::parse_url("redis://:pw@h:1/").unwrap();
         assert_eq!((c.username, c.password.as_deref()), (None, Some("pw")));
         assert!(ConnectionConfig::parse_url("h:notaport").is_err());
+    }
+
+    #[test]
+    fn parses_tls_urls() {
+        let c =
+            ConnectionConfig::parse_url("rediss://default:pw@cache.example.com:6380/1").unwrap();
+        assert_eq!(
+            (c.host.as_str(), c.port, c.db),
+            ("cache.example.com", 6380, 1)
+        );
+        assert_eq!(c.tls, Some(TlsConfig::default()));
+        let c = ConnectionConfig::parse_url("rediss://127.0.0.1:6390#insecure").unwrap();
+        assert!(c.tls.unwrap().insecure);
+        assert!(ConnectionConfig::parse_url("redis://h#insecure").is_err());
+        assert!(ConnectionConfig::parse_url("rediss://h#nope").is_err());
+        assert!(
+            ConnectionConfig::parse_url("redis://h")
+                .unwrap()
+                .tls
+                .is_none()
+        );
     }
 
     #[test]

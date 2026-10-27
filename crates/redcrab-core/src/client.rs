@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Result, bail};
 use futures::{SinkExt as _, StreamExt as _, channel::mpsc};
 use redis::{
     Value,
@@ -71,18 +71,54 @@ impl Default for ScanOptions {
     }
 }
 
+/// Turns a failed connection attempt into an error that says what to do.
+/// The library's own message stays at the end of the chain.
+fn connect_error(err: redis::RedisError, config: &ConnectionConfig) -> anyhow::Error {
+    let message = err.to_string();
+    let has = |needle: &str| message.contains(needle);
+    let tls = config.tls.is_some();
+    let hint = if has("UnknownIssuer") {
+        Some("the server's certificate is not signed by a trusted CA; add its CA file, or allow untrusted certificates for a self-signed development server".to_string())
+    } else if has("NotValidForName") {
+        Some(format!(
+            "the server's certificate is not valid for {}",
+            config.host
+        ))
+    } else if has("Expired") {
+        Some("the server's certificate has expired".into())
+    } else if has("CertificateRequired") {
+        Some("the server requires a client certificate (mutual TLS)".into())
+    } else if has("WRONGPASS") || has("NOAUTH") || has("invalid username-password") {
+        Some("wrong username or password".into())
+    } else if has("Connection refused") {
+        Some(format!("nothing is listening on {}", config.address()))
+    } else if tls && has("timed out") {
+        Some("no answer to the TLS handshake; if the server does not use TLS, turn TLS off".into())
+    } else if !tls && (has("broken pipe") || has("reset by peer") || has("end of file")) {
+        Some("the server closed the connection; if it requires TLS, turn TLS on (rediss://)".into())
+    } else {
+        None
+    };
+    let err = anyhow::Error::new(err);
+    let err = match hint {
+        Some(hint) => err.context(hint),
+        None => err,
+    };
+    err.context(format!("could not connect to {}", config.address()))
+}
+
 impl Client {
     pub async fn connect(config: ConnectionConfig) -> Result<Self> {
-        let info = config.connection_info()?;
         spawn(async move {
-            let client = redis::Client::open(info)?;
+            // Reads certificate files, so it runs here rather than on the caller's thread.
+            let client = config.client()?;
             let manager_config = ConnectionManagerConfig::new()
                 .set_connection_timeout(Some(Duration::from_secs(5)))
                 .set_response_timeout(Some(Duration::from_secs(30)))
                 .set_number_of_retries(1);
             let con = ConnectionManager::new_with_config(client, manager_config)
                 .await
-                .with_context(|| format!("could not connect to {}", config.address()))?;
+                .map_err(|err| connect_error(err, &config))?;
             Ok(Self {
                 con,
                 config: Arc::new(config),

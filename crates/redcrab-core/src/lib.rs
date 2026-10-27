@@ -13,7 +13,7 @@ mod tree;
 mod value;
 
 pub use client::{Client, Key, ScanEvent, ScanOptions, ServerInfo};
-pub use config::ConnectionConfig;
+pub use config::{ConnectionConfig, TlsConfig};
 pub use redis::Value as RawValue;
 pub use tree::{KeyTree, NodeId, Row, RowKind};
 pub use value::{Cursor, KeyMeta, KeyType, StreamEntry, ValueData, ValuePage};

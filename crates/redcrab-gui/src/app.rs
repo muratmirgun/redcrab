@@ -104,11 +104,9 @@ impl Render for RedcrabApp {
         let connection = match &self.screen {
             Screen::Workspace(workspace) => {
                 let config = workspace.read(cx).client().config();
-                Some(format!(
-                    "{} · {} · db{}",
-                    config.name,
-                    config.address(),
-                    config.db
+                Some((
+                    format!("{} · {} · db{}", config.name, config.address(), config.db),
+                    config.tls.is_some(),
                 ))
             }
             Screen::Connect(_) => None,
@@ -131,9 +129,18 @@ impl Render for RedcrabApp {
                                     .text_color(rgb(BRAND_RED)),
                             )
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("redcrab"))
-                            .when_some(connection, |this, connection| {
+                            .when_some(connection, |this, (connection, tls)| {
                                 this.child(
-                                    div().text_color(theme.muted_foreground).child(connection),
+                                    h_flex()
+                                        .gap_1()
+                                        .text_color(theme.muted_foreground)
+                                        .when(tls, |this| {
+                                            this.child(
+                                                Icon::new(gpui_kit::assets::IconName::Lock)
+                                                    .xsmall(),
+                                            )
+                                        })
+                                        .child(connection),
                                 )
                             }),
                     )

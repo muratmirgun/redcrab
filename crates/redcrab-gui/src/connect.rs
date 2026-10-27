@@ -1,10 +1,13 @@
+use std::path::PathBuf;
+
 use gpui_kit::{
     AppContext as _, ClickEvent, Context, Entity, EventEmitter, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
     component::{
         ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
         button::{Button, ButtonVariants as _},
+        checkbox::Checkbox,
         h_flex,
         input::{Input, InputEvent, InputState},
         label::Label,
@@ -15,7 +18,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px,
 };
-use redcrab_core::{Client, ConnectionConfig, format, store};
+use redcrab_core::{Client, ConnectionConfig, TlsConfig, format, store};
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_NOTE: &str =
@@ -49,6 +52,11 @@ pub struct ConnectView {
     username: Entity<InputState>,
     password: Entity<InputState>,
     separator: Entity<InputState>,
+    tls: bool,
+    tls_insecure: bool,
+    tls_ca: Entity<InputState>,
+    tls_cert: Entity<InputState>,
+    tls_key: Entity<InputState>,
     busy: bool,
     error: Option<SharedString>,
     _task: Option<Task<()>>,
@@ -73,17 +81,23 @@ impl ConnectView {
                 .placeholder("Leave empty to use the saved one")
         });
         let separator = input(":", window, cx);
+        let tls_ca = input("System certificates", window, cx);
+        let tls_cert = input("Only for mutual TLS", window, cx);
+        let tls_key = input("Only for mutual TLS", window, cx);
 
-        let subscriptions = [&name, &host, &port, &db, &username, &password, &separator]
-            .into_iter()
-            .map(|input| {
-                cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.connect(window, cx);
-                    }
-                })
+        let subscriptions = [
+            &name, &host, &port, &db, &username, &password, &separator, &tls_ca, &tls_cert,
+            &tls_key,
+        ]
+        .into_iter()
+        .map(|input| {
+            cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.connect(window, cx);
+                }
             })
-            .collect();
+        })
+        .collect();
 
         let saved = store::load_connections();
         let mut this = Self {
@@ -95,6 +109,11 @@ impl ConnectView {
             username,
             password,
             separator,
+            tls: false,
+            tls_insecure: false,
+            tls_ca,
+            tls_cert,
+            tls_key,
             busy: false,
             error: None,
             _task: None,
@@ -143,6 +162,17 @@ impl ConnectView {
             cx,
         );
         set(&self.separator, config.separator.to_string(), window, cx);
+        let tls = config.tls.clone().unwrap_or_default();
+        let path = |p: &Option<PathBuf>| {
+            p.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        };
+        set(&self.tls_ca, path(&tls.ca_file), window, cx);
+        set(&self.tls_cert, path(&tls.client_cert_file), window, cx);
+        set(&self.tls_key, path(&tls.client_key_file), window, cx);
+        self.tls = config.tls.is_some();
+        self.tls_insecure = tls.insecure;
         self.error = None;
         cx.notify();
     }
@@ -169,6 +199,15 @@ impl ConnectView {
             },
             username: non_empty(value(&self.username)),
             password: non_empty(self.password.read(cx).value().to_string()),
+            tls: self.tls.then(|| {
+                let path = |input: &Entity<InputState>| non_empty(value(input)).map(PathBuf::from);
+                TlsConfig {
+                    insecure: self.tls_insecure,
+                    ca_file: path(&self.tls_ca),
+                    client_cert_file: path(&self.tls_cert),
+                    client_key_file: path(&self.tls_key),
+                }
+            }),
             separator: value(&self.separator)
                 .chars()
                 .next()
@@ -403,15 +442,21 @@ impl ConnectView {
                                     .min_w_0()
                                     .child(div().text_sm().truncate().child(config.name.clone()))
                                     .child(
-                                        div()
+                                        h_flex()
+                                            .gap_1()
                                             .text_xs()
-                                            .truncate()
                                             .text_color(theme.muted_foreground)
-                                            .child(format!(
+                                            .when(config.tls.is_some(), |this| {
+                                                this.child(
+                                                    Icon::new(gpui_kit::assets::IconName::Lock)
+                                                        .xsmall(),
+                                                )
+                                            })
+                                            .child(div().truncate().child(format!(
                                                 "{} · db{}",
                                                 config.address(),
                                                 config.db
-                                            )),
+                                            ))),
                                     ),
                             )
                             .child(
@@ -432,6 +477,121 @@ impl ConnectView {
                             )
                     })),
             )
+    }
+
+    /// Fills `target` with a file picked in the system dialog.
+    fn browse(&mut self, target: Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            this.update_in(cx, |_, window, cx| {
+                target.update(cx, |input, cx| {
+                    input.set_value(path.display().to_string(), window, cx)
+                });
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn file_field(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        input: &Entity<InputState>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let target = input.clone();
+        v_flex()
+            .gap_1()
+            .flex_1()
+            .child(Label::new(label).text_sm())
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(input).cleanable(true)),
+                    )
+                    .child(
+                        Button::new(id)
+                            .outline()
+                            .icon(IconName::FolderOpen)
+                            .tooltip("Choose a PEM file")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.browse(target.clone(), window, cx)
+                            })),
+                    ),
+            )
+    }
+
+    fn render_tls(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (warning, muted) = (theme.warning, theme.muted_foreground);
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_4()
+                    .child(
+                        Checkbox::new("tls")
+                            .label("Use TLS")
+                            .checked(self.tls)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.tls = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.tls, |this| {
+                        this.child(
+                            Checkbox::new("tls-insecure")
+                                .label("Accept untrusted certificates")
+                                .checked(self.tls_insecure)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.tls_insecure = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .when(self.tls && self.tls_insecure, |this| {
+                this.child(
+                    h_flex()
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(warning)
+                        .child(Icon::new(gpui_kit::assets::IconName::ShieldAlert).xsmall())
+                        .child("The server is not verified, so the traffic can be intercepted. Use only for development servers."),
+                )
+            })
+            .when(self.tls, |this| {
+                this.child(self.file_field("browse-ca", "CA certificate", &self.tls_ca, cx))
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(self.file_field("browse-cert", "Client certificate", &self.tls_cert, cx))
+                            .child(self.file_field("browse-key", "Client key", &self.tls_key, cx)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(-4.))
+                            .text_xs()
+                            .text_color(muted)
+                            .child("PEM files. Without a CA file the system's trusted certificates are used."),
+                    )
+            })
     }
 
     fn field(label: &'static str, input: &Entity<InputState>) -> impl IntoElement {
@@ -514,6 +674,8 @@ impl Render for ConnectView {
                             .child("Splits key names into folders, e.g. user:42:profile."),
                     ),
             )
+            .child(div().h(px(1.)).bg(theme.border))
+            .child(self.render_tls(cx))
             .when_some(self.error.clone(), |this, error| {
                 this.child(
                     div()
@@ -548,12 +710,11 @@ impl Render for ConnectView {
 
         h_flex().size_full().child(self.render_saved(cx)).child(
             div()
+                .id("connect-form")
                 .flex_1()
                 .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(form),
+                .overflow_y_scroll()
+                .child(div().flex().justify_center().py_10().child(form)),
         )
     }
 }
