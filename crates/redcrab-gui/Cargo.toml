@@ -1,0 +1,29 @@
+[package]
+name = "redcrab-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "redcrab"
+path = "src/main.rs"
+
+[features]
+default = ["runtime-shaders"]
+# Compile Metal shaders at startup instead of build time. Needed when only the
+# Command Line Tools are installed (no `xcrun metal`). Turn off for release
+# builds made with full Xcode.
+runtime-shaders = ["dep:gpui-pre-apple", "gpui-pre-apple/runtime_shaders"]
+
+[dependencies]
+redcrab-core.workspace = true
+gpui-kit = { version = "0.8.1", features = ["tree-sitter"] }
+anyhow.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-apple = { version = "=0.3.10", optional = true }
