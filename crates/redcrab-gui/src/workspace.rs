@@ -14,7 +14,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px,
 };
-use redcrab_core::{Client, ServerInfo, format};
+use redcrab_core::{Client, ServerInfo};
 
 use crate::{
     DeleteKey, FocusSearch, Refresh, ToggleConsole,
@@ -48,7 +48,7 @@ impl Workspace {
     pub fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let keys = cx.new(|cx| KeyBrowser::new(client.clone(), window, cx));
         let value = cx.new(|_| ValuePanel::new(client.clone()));
-        let console = cx.new(|cx| Console::new(client.clone(), window, cx));
+        let console = cx.new(|cx| Console::new(&client, window, cx));
 
         let subscriptions = vec![
             cx.subscribe_in(&keys, window, |this, _, event, window, cx| match event {
@@ -120,6 +120,10 @@ impl Workspace {
     }
 
     fn delete_key(&mut self, _: &DeleteKey, window: &mut Window, cx: &mut Context<Self>) {
+        // Read-only connections have no delete (core would refuse it anyway).
+        if self.client.config().read_only {
+            return;
+        }
         self.value
             .update(cx, |value, cx| value.request_delete(window, cx));
     }
@@ -157,12 +161,15 @@ impl Workspace {
                     .child(div().size(px(7.)).rounded_full().bg(dot))
                     .child(if self.online { "Connected" } else { "Offline" }),
             )
-            .when_some(self.info.as_ref(), |this, info| {
-                this.child(item(format!("Redis {} · {}", info.version, info.mode)))
-                    .child(item(format!("{} keys", format::count(info.db_size))))
-                    .child(item(format!("{} used", info.used_memory_human)))
-                    .child(item(format!("{} clients", info.connected_clients)))
-            })
+            // Only what the server told: a user without INFO sees none of it.
+            .children(
+                self.info
+                    .as_ref()
+                    .map(ServerInfo::summary)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(item),
+            )
             .when_some(self.latency, |this, latency| {
                 this.child(item(format!("{:.2} ms", latency.as_secs_f64() * 1000.0)))
             })

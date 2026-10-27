@@ -21,6 +21,68 @@ pub struct ConnectionConfig {
     /// `None` connects over plain TCP.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsConfig>,
+    /// Refuses every change to the server, in the app and in the console
+    /// (see [`crate::Client::ensure_writable`]).
+    pub read_only: bool,
+    /// Tags the connection so a production server is hard to mistake.
+    pub environment: Environment,
+}
+
+/// What a server is used for, shown as a colored tag. Stored in lower case
+/// (`"production"`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Environment {
+    #[default]
+    None,
+    Development,
+    Staging,
+    Production,
+}
+
+impl Environment {
+    pub const ALL: [Self; 4] = [
+        Self::None,
+        Self::Development,
+        Self::Staging,
+        Self::Production,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Development => "Development",
+            Self::Staging => "Staging",
+            Self::Production => "Production",
+        }
+    }
+
+    /// The name in saved files.
+    fn key(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Development => "development",
+            Self::Staging => "staging",
+            Self::Production => "production",
+        }
+    }
+}
+
+impl Serialize for Environment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+/// Tags this version does not know (written by a newer one) load as `None`
+/// instead of making the whole connections file unreadable.
+impl<'de> Deserialize<'de> for Environment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let key = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
+        Ok(Self::ALL
+            .into_iter()
+            .find(|environment| environment.key().eq_ignore_ascii_case(&key))
+            .unwrap_or_default())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +137,8 @@ impl Default for ConnectionConfig {
             db: 0,
             separator: ':',
             tls: None,
+            read_only: false,
+            environment: Environment::None,
         }
     }
 }
@@ -133,6 +197,53 @@ impl ConnectionConfig {
             tls,
             ..Self::default()
         })
+    }
+
+    /// The settings to open a URL start (see [`Self::parse_url`]) with, when
+    /// `saved` holds a connection of the same name. A URL start is named
+    /// after its address, so running the same URL again finds the entry the
+    /// first run saved, which the user may since have tagged or made
+    /// read-only.
+    ///
+    /// A URL only says where to connect and how to log in, so that is all it
+    /// changes; everything else (separator, TLS files, environment) comes
+    /// from the saved connection. It can never lower a guard rail: a
+    /// read-only connection stays read-only, its environment tag stays, and
+    /// TLS stays on even when the URL leaves out `rediss://`, since sending
+    /// the saved password in clear text would be worse than failing to
+    /// connect.
+    pub fn with_saved(self, saved: &[ConnectionConfig]) -> ConnectionConfig {
+        let Some(saved) = saved.iter().find(|c| c.name == self.name) else {
+            return self;
+        };
+        // Without credentials in the URL the saved user logs in, with the
+        // password saved for it.
+        let credentials = self.username.is_some() || self.password.is_some();
+        ConnectionConfig {
+            name: saved.name.clone(),
+            host: self.host,
+            port: self.port,
+            username: if credentials {
+                self.username
+            } else {
+                saved.username.clone()
+            },
+            password: self.password,
+            db: self.db,
+            separator: saved.separator,
+            tls: match (self.tls, &saved.tls) {
+                (Some(url), Some(saved)) => Some(TlsConfig {
+                    insecure: url.insecure || saved.insecure,
+                    ..saved.clone()
+                }),
+                (url, saved) => url.or_else(|| saved.clone()),
+            },
+            read_only: self.read_only || saved.read_only,
+            environment: match self.environment {
+                Environment::None => saved.environment,
+                tagged => tagged,
+            },
+        }
     }
 
     pub fn address(&self) -> String {
@@ -240,6 +351,84 @@ mod tests {
     }
 
     #[test]
+    fn url_starts_keep_the_guard_rails_of_the_saved_connection() {
+        let saved = vec![
+            ConnectionConfig {
+                name: "other".into(),
+                ..Default::default()
+            },
+            ConnectionConfig {
+                name: "prod-cache:6379".into(),
+                host: "prod-cache".into(),
+                port: 6379,
+                username: Some("app".into()),
+                db: 3,
+                separator: '/',
+                tls: Some(TlsConfig {
+                    insecure: false,
+                    ca_file: Some("/etc/ca.pem".into()),
+                    client_cert_file: Some("/etc/cert.pem".into()),
+                    client_key_file: Some("/etc/key.pem".into()),
+                }),
+                read_only: true,
+                environment: Environment::Production,
+                ..Default::default()
+            },
+        ];
+        let url = |url: &str| ConnectionConfig::parse_url(url).unwrap();
+
+        // The same URL again: only what the URL says changes.
+        let merged = url("redis://prod-cache:6379").with_saved(&saved);
+        assert!(merged.read_only);
+        assert_eq!(merged.environment, Environment::Production);
+        assert_eq!(merged.name, "prod-cache:6379");
+        assert_eq!(merged.username.as_deref(), Some("app"));
+        assert_eq!(merged.password, None);
+        assert_eq!(merged.separator, '/');
+        assert_eq!(merged.db, 0, "the URL picks the database");
+        // `redis://` cannot switch TLS off and send the password in clear text.
+        assert_eq!(merged.tls, saved[1].tls);
+
+        // Credentials and TLS options the URL gives win; the files stay.
+        let merged = url("rediss://ops:pw@prod-cache:6379/5#insecure").with_saved(&saved);
+        assert_eq!(
+            (merged.username.as_deref(), merged.password.as_deref()),
+            (Some("ops"), Some("pw"))
+        );
+        assert_eq!(merged.db, 5);
+        let tls = merged.tls.unwrap();
+        assert!(tls.insecure);
+        assert_eq!(tls.ca_file.as_deref(), Some(Path::new("/etc/ca.pem")));
+        assert_eq!(
+            tls.client_key_file.as_deref(),
+            Some(Path::new("/etc/key.pem"))
+        );
+        assert!(merged.read_only);
+        // A lone password logs in as the default user, like redis-cli's `-a`.
+        let merged = url("redis://:pw@prod-cache:6379").with_saved(&saved);
+        assert_eq!(merged.username, None);
+
+        // A saved connection without the guard rails gains nothing, and an
+        // insecure one stays insecure.
+        let plain = vec![ConnectionConfig {
+            name: "dev:6390".into(),
+            tls: Some(TlsConfig {
+                insecure: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        let merged = url("rediss://dev:6390").with_saved(&plain);
+        assert!(!merged.read_only);
+        assert_eq!(merged.environment, Environment::None);
+        assert!(merged.tls.unwrap().insecure);
+
+        // Nothing saved under that name: the URL as it is.
+        let fresh = url("redis://elsewhere:6379/2");
+        assert_eq!(fresh.clone().with_saved(&saved), fresh);
+    }
+
+    #[test]
     fn never_serializes_passwords() {
         let config = ConnectionConfig {
             password: Some("s3cret".into()),
@@ -255,5 +444,53 @@ mod tests {
         let old: ConnectionConfig =
             serde_json::from_str(r#"{"name":"x","password":"s3cret"}"#).unwrap();
         assert_eq!(old.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn files_without_read_only_or_environment_still_load() {
+        // A connection as the previous version saved it.
+        let old: Vec<ConnectionConfig> = serde_json::from_str(
+            r#"[{"name":"prod","host":"cache.example.com","port":6380,"username":"app","db":2,"separator":":","tls":{"insecure":false,"ca_file":"/etc/ca.pem","client_cert_file":null,"client_key_file":null}}]"#,
+        )
+        .unwrap();
+        let old = &old[0];
+        assert_eq!(
+            (old.host.as_str(), old.port, old.db),
+            ("cache.example.com", 6380, 2)
+        );
+        assert!(old.tls.is_some());
+        assert!(!old.read_only);
+        assert_eq!(old.environment, Environment::None);
+    }
+
+    #[test]
+    fn read_only_and_environment_round_trip() {
+        for environment in Environment::ALL {
+            let config = ConnectionConfig {
+                read_only: true,
+                environment,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&config).unwrap();
+            assert!(json.contains(r#""read_only":true"#), "{json}");
+            let back: ConnectionConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, config);
+        }
+        let json = serde_json::to_string(&Environment::Production).unwrap();
+        assert_eq!(json, r#""production""#);
+    }
+
+    #[test]
+    fn unknown_environments_load_as_none() {
+        // Written by a newer version with more tags: the rest of the file must survive.
+        for value in [r#""qa""#, "null", r#""""#] {
+            let json = format!(r#"{{"name":"x","environment":{value},"read_only":true}}"#);
+            let config: ConnectionConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(config.environment, Environment::None, "{json}");
+            assert!(config.read_only);
+        }
+        let config: ConnectionConfig =
+            serde_json::from_str(r#"{"environment":"Staging"}"#).unwrap();
+        assert_eq!(config.environment, Environment::Staging);
     }
 }

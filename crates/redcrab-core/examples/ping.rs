@@ -5,7 +5,7 @@
 //!         [--ca ca.crt] [--cert client.crt --key client.key]
 
 use anyhow::{Context as _, bail};
-use redcrab_core::{Client, ConnectionConfig, format};
+use redcrab_core::{Client, ConnectionConfig};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -32,13 +32,9 @@ fn main() -> anyhow::Result<()> {
         let client = Client::connect(config).await?;
         let latency = client.ping().await?;
         let info = client.server_info().await?;
-        println!(
-            "redis {} ({}) · {} keys · {:.2} ms",
-            info.version,
-            info.mode,
-            format::count(info.db_size),
-            latency.as_secs_f64() * 1000.0
-        );
+        let mut facts = info.summary();
+        facts.push(format!("{:.2} ms", latency.as_secs_f64() * 1000.0));
+        println!("{}", facts.join(" · "));
         Ok(())
     })
 }

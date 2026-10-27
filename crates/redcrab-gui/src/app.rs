@@ -10,12 +10,21 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px, rgb, svg,
 };
-use redcrab_core::{Client, ConnectionConfig};
+use redcrab_core::{Client, ConnectionConfig, Environment};
 
 use crate::{
     connect::{ConnectEvent, ConnectView, Start},
+    style,
     workspace::{Workspace, WorkspaceEvent},
 };
+
+/// What the title bar says about the connected server.
+struct Connection {
+    label: String,
+    tls: bool,
+    environment: Environment,
+    read_only: bool,
+}
 
 /// The logo red, `#E5432D`.
 const BRAND_RED: u32 = 0xE5432D;
@@ -104,13 +113,18 @@ impl Render for RedcrabApp {
         let connection = match &self.screen {
             Screen::Workspace(workspace) => {
                 let config = workspace.read(cx).client().config();
-                Some((
-                    format!("{} · {} · db{}", config.name, config.address(), config.db),
-                    config.tls.is_some(),
-                ))
+                Some(Connection {
+                    label: format!("{} · {} · db{}", config.name, config.address(), config.db),
+                    tls: config.tls.is_some(),
+                    environment: config.environment,
+                    read_only: config.read_only,
+                })
             }
             Screen::Connect(_) => None,
         };
+        let environment = connection.as_ref().and_then(|c| {
+            style::environment_color(c.environment, cx).map(|color| (c.environment, color))
+        });
 
         v_flex()
             .size_full()
@@ -129,19 +143,30 @@ impl Render for RedcrabApp {
                                     .text_color(rgb(BRAND_RED)),
                             )
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("redcrab"))
-                            .when_some(connection, |this, (connection, tls)| {
+                            .when_some(connection, |this, connection| {
                                 this.child(
                                     h_flex()
                                         .gap_1()
+                                        .min_w_0()
                                         .text_color(theme.muted_foreground)
-                                        .when(tls, |this| {
+                                        .when(connection.tls, |this| {
                                             this.child(
                                                 Icon::new(gpui_kit::assets::IconName::Lock)
                                                     .xsmall(),
                                             )
                                         })
-                                        .child(connection),
+                                        .child(div().truncate().child(connection.label)),
                                 )
+                                .when_some(environment, |this, (environment, color)| {
+                                    this.child(style::badge(
+                                        environment.label().to_uppercase(),
+                                        color,
+                                        cx,
+                                    ))
+                                })
+                                .when(connection.read_only, |this| {
+                                    this.child(style::badge("READ-ONLY", theme.info, cx))
+                                })
                             }),
                     )
                     .child(
@@ -159,6 +184,10 @@ impl Render for RedcrabApp {
                         ),
                     ),
             )
+            // A thin strip in the environment's color under the title bar.
+            .when_some(environment, |this, (_, color)| {
+                this.child(div().h(px(2.)).flex_none().bg(color))
+            })
             .child(div().flex_1().min_h_0().map(|this| match &self.screen {
                 Screen::Connect(view) => this.child(view.clone()),
                 Screen::Workspace(view) => this.child(view.clone()),

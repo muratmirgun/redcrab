@@ -5,7 +5,9 @@ use gpui_kit::{
     ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Window,
     component::{
-        ActiveTheme as _, Icon, Sizable as _, h_flex,
+        ActiveTheme as _, Icon, Sizable as _,
+        button::{Button, ButtonVariants as _},
+        h_flex,
         input::{Input, InputEvent, InputState},
         scroll::ScrollableElement as _,
         v_flex,
@@ -13,7 +15,9 @@ use gpui_kit::{
     div,
     prelude::FluentBuilder as _,
 };
-use redcrab_core::{Client, format};
+use redcrab_core::{Client, ConsoleSession, format};
+
+use crate::StopCommand;
 
 /// Replies longer than this are cut in the log.
 const MAX_OUTPUT: usize = 64 * 1024;
@@ -26,18 +30,21 @@ struct Entry {
     elapsed: Option<Duration>,
 }
 
-/// A `redis-cli` style prompt.
+/// A `redis-cli` style prompt. It runs commands on a session of its own, so
+/// SELECT or MULTI typed here never affect the rest of the app.
 pub struct Console {
-    client: Client,
+    session: ConsoleSession,
     input: Entity<InputState>,
     entries: Vec<Entry>,
+    /// Commands submitted and not answered yet: one running, the rest
+    /// waiting behind it.
     running: usize,
     scroll: ScrollHandle,
     _subscription: Subscription,
 }
 
 impl Console {
-    pub fn new(client: Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(client: &Client, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Run a command, e.g. INFO memory"));
         let subscription =
@@ -47,7 +54,7 @@ impl Console {
                 }
             });
         Self {
-            client,
+            session: client.console(),
             input,
             entries: Vec::new(),
             running: 0,
@@ -83,7 +90,7 @@ impl Console {
         self.running += 1;
         cx.notify();
         let started = Instant::now();
-        let request = self.client.exec(args);
+        let request = self.session.exec(args);
         cx.spawn(async move |this, cx| {
             let result = request.await;
             let elapsed = started.elapsed();
@@ -98,6 +105,23 @@ impl Console {
             .ok();
         })
         .detach();
+    }
+
+    /// Abandons the running command and the ones waiting behind it; a
+    /// `BLPOP key 0` would otherwise hold the console until disconnecting.
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        if self.running > 0 {
+            self.session.cancel();
+            cx.notify();
+        }
+    }
+
+    fn on_stop(&mut self, _: &StopCommand, _: &mut Window, cx: &mut Context<Self>) {
+        if self.running == 0 {
+            // Nothing to stop; Escape may mean something further up.
+            cx.propagate();
+        }
+        self.stop(cx);
     }
 
     fn push(
@@ -143,8 +167,15 @@ impl Render for Console {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let mono = theme.mono_font_family.clone();
+        let status = match self.running {
+            0 => None,
+            1 => Some("running…".to_string()),
+            n => Some(format!("running… {} queued", n - 1)),
+        };
         v_flex()
             .size_full()
+            .key_context("Console")
+            .on_action(cx.listener(Self::on_stop))
             .bg(theme.background)
             .child(
                 div()
@@ -164,7 +195,7 @@ impl Render for Console {
                             .text_xs()
                             .when(self.entries.is_empty(), |this| {
                                 this.child(div().text_color(theme.muted_foreground).child(
-                                    "Commands run on this connection. Type clear to empty the log.",
+                                    "Commands run on the console's own connection, so SELECT and MULTI stay here. Type clear to empty the log.",
                                 ))
                             })
                             .children(self.entries.iter().map(|entry| {
@@ -215,12 +246,23 @@ impl Render for Console {
                                 .small()
                                 .text_color(theme.muted_foreground),
                         )
-                        .when(self.running > 0, |input| {
+                        .when_some(status, |input, status| {
                             input.suffix(
-                                div()
+                                h_flex()
+                                    .gap_1()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child("running…"),
+                                    .child(status)
+                                    .child(
+                                        Button::new("stop")
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Stop")
+                                            .tooltip("Stop the running command (Esc)")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.stop(cx)),
+                                            ),
+                                    ),
                             )
                         }),
                 ),

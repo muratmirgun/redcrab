@@ -28,6 +28,7 @@ gpui_kit::actions!(
         SelectNext,
         Expand,
         Collapse,
+        StopCommand,
     ]
 );
 
@@ -69,6 +70,8 @@ fn main() {
                 KeyBinding::new("down", SelectNext, Some("KeyList")),
                 KeyBinding::new("right", Expand, Some("KeyList")),
                 KeyBinding::new("left", Collapse, Some("KeyList")),
+                // Reaches the console once its input has nothing to dismiss.
+                KeyBinding::new("escape", StopCommand, Some("Console")),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_action(|_: &NewWindow, cx| open_main_window(Start::Fresh, cx));

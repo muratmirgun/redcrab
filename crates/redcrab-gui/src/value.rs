@@ -1,6 +1,5 @@
 use std::{ops::Range, time::Duration};
 
-use anyhow::Context as _;
 use gpui_kit::{
     AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
@@ -20,38 +19,32 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px, uniform_list,
 };
-use redcrab_core::{Client, Cursor, Key, KeyMeta, KeyType, ValueData, format};
+use redcrab_core::{
+    Client, Key, ValueData, format,
+    viewer::{self, Loaded, PAGE, TextValue},
+};
 
 use crate::style;
 
-/// Elements fetched per page of a collection.
-const PAGE: usize = 500;
-/// Bytes of a cell shown in the table; the full value is in the detail pane.
-const CELL_PREVIEW: usize = 256;
 const ROW_HEIGHT: f32 = 26.;
+/// Width of a narrow first column (list index, score, stream ID).
+const NARROW_COLUMN: f32 = 150.;
 
 pub enum ValueEvent {
     Deleted(Key),
 }
 
-struct Loaded {
-    meta: KeyMeta,
-    data: ValueData,
-    total: u64,
-    next: Option<Cursor>,
-    memory: Option<u64>,
-}
-
 /// What the text editor currently shows.
 struct TextView {
     editor: Entity<EditorState>,
-    /// Pretty-printed from compact JSON; saved back compact.
-    reformatted_json: bool,
-    editable: bool,
+    /// The editing rules; its text was handed to the editor.
+    value: TextValue,
     dirty: bool,
     _subscription: Subscription,
 }
 
+/// The selected key's value. Loading, paging and the text rules live in
+/// [`viewer`]; this view draws them and runs the requests.
 pub struct ValuePanel {
     client: Client,
     key: Option<Key>,
@@ -64,6 +57,7 @@ pub struct ValuePanel {
     confirm_delete: bool,
     scroll: UniformListScrollHandle,
     _load: Option<Task<()>>,
+    _more: Option<Task<()>>,
     _confirm_reset: Option<Task<()>>,
 }
 
@@ -83,8 +77,14 @@ impl ValuePanel {
             confirm_delete: false,
             scroll: UniformListScrollHandle::new(),
             _load: None,
+            _more: None,
             _confirm_reset: None,
         }
+    }
+
+    /// A read-only connection shows values but never offers to change them.
+    fn read_only(&self) -> bool {
+        self.client.config().read_only
     }
 
     pub fn load(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
@@ -95,32 +95,15 @@ impl ValuePanel {
         self.error = None;
         self.confirm_delete = false;
         self.loading = true;
+        self.loading_more = false;
+        self._more = None;
         cx.notify();
 
-        let client = self.client.clone();
+        let request = viewer::load(&self.client, key);
         // Replacing the task drops the previous load, so fast arrowing through
         // keys never shows a stale value.
         self._load = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = async {
-                let meta = client
-                    .key_meta(vec![key.clone()])
-                    .await?
-                    .pop()
-                    .context("empty reply")?;
-                let (page, memory) = futures::join!(
-                    client.load(key.clone(), meta.ty.clone(), Cursor::Start, PAGE),
-                    client.memory_usage(key.clone()),
-                );
-                let page = page?;
-                anyhow::Ok(Loaded {
-                    meta,
-                    data: page.data,
-                    total: page.total,
-                    next: page.next,
-                    memory: memory.ok().flatten(),
-                })
-            }
-            .await;
+            let result = request.await;
             this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 match result {
@@ -140,35 +123,21 @@ impl ValuePanel {
     }
 
     fn show(&mut self, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) {
-        self.text = match &loaded.data {
-            ValueData::String(bytes) => {
-                let truncated = loaded.total > bytes.len() as u64;
-                Some(self.text_view(bytes, !truncated, window, cx))
-            }
-            ValueData::Json(json) => Some(self.text_view(json.as_bytes(), false, window, cx)),
-            _ => None,
-        };
+        self.text = loaded
+            .text(!self.read_only())
+            .map(|value| self.text_view(value, window, cx));
         self.loaded = Some(loaded);
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
     }
 
-    /// Builds an editor for `bytes`, pretty-printing JSON. Only lossless UTF-8
-    /// text is ever editable.
     fn text_view(
         &self,
-        bytes: &[u8],
-        editable: bool,
+        mut value: TextValue,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> TextView {
-        let json = pretty_json(bytes);
-        let lossless = matches!(format::bytes(bytes), std::borrow::Cow::Borrowed(_));
-        let reformatted_json = json
-            .as_ref()
-            .is_some_and(|pretty| pretty.as_bytes() != bytes);
-        let is_json = json.is_some();
-        let text = json.unwrap_or_else(|| format::bytes(bytes).into_owned());
-        let editable = editable && lossless;
+        let text = std::mem::take(&mut value.text);
+        let is_json = value.is_json;
         let editor = cx.new(|cx| {
             let state = EditorState::new(window, cx)
                 .line_number(true)
@@ -182,7 +151,7 @@ impl ValuePanel {
         });
         let subscription = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
             if let (InputEvent::Change, Some(text)) = (event, this.text.as_mut())
-                && text.editable
+                && text.value.editable
                 && !text.dirty
             {
                 text.dirty = true;
@@ -191,8 +160,7 @@ impl ValuePanel {
         });
         TextView {
             editor,
-            reformatted_json,
-            editable,
+            value,
             dirty: false,
             _subscription: subscription,
         }
@@ -202,17 +170,13 @@ impl ValuePanel {
         let (Some(key), Some(text)) = (self.key.clone(), self.text.as_mut()) else {
             return;
         };
-        if !text.editable || !text.dirty {
+        if !text.value.editable || !text.dirty {
             return;
         }
-        let mut value = text.editor.read(cx).value().to_string();
-        if text.reformatted_json
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value)
-        {
-            value = parsed.to_string();
-        }
+        let edited = text.editor.read(cx).value();
+        let bytes = text.value.bytes_to_save(&edited);
         text.dirty = false;
-        let request = self.client.set_string(key, value.into_bytes());
+        let request = self.client.set_string(key, bytes);
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| match result {
@@ -237,33 +201,27 @@ impl ValuePanel {
     }
 
     fn load_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(key), Some(loaded)) = (self.key.clone(), self.loaded.as_ref()) else {
-            return;
-        };
-        let Some(cursor) = loaded.next.clone() else {
-            return;
-        };
         if self.loading_more {
             return;
         }
+        let Some(request) = self
+            .loaded
+            .as_ref()
+            .and_then(|loaded| loaded.load_more(&self.client))
+        else {
+            return;
+        };
         self.loading_more = true;
         cx.notify();
-        let request = self
-            .client
-            .load(key.clone(), loaded.meta.ty.clone(), cursor, PAGE);
-        cx.spawn_in(window, async move |this, cx| {
+        // Kept in a field: a new load drops it, so a page never lands on
+        // another key (and `apply_page` refuses one that does not fit).
+        self._more = Some(cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
                 this.loading_more = false;
-                // The user may have moved on to another key meanwhile.
-                if this.key.as_ref() != Some(&key) {
-                    return;
-                }
                 match (result, this.loaded.as_mut()) {
                     (Ok(page), Some(loaded)) => {
-                        loaded.data.extend(page.data);
-                        loaded.next = page.next;
-                        loaded.total = page.total;
+                        loaded.apply_page(page);
                     }
                     (Err(err), _) => {
                         window.push_notification(Notification::error(format!("{err:#}")), cx)
@@ -273,12 +231,14 @@ impl ValuePanel {
                 cx.notify();
             })
             .ok();
-        })
-        .detach();
+        }));
     }
 
     /// First call arms the button; a second within three seconds deletes.
     pub fn request_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only() {
+            return;
+        }
         let Some(key) = self.key.clone() else {
             return;
         };
@@ -309,9 +269,12 @@ impl ValuePanel {
                             )),
                             cx,
                         );
-                        this.key = None;
-                        this.loaded = None;
-                        this.text = None;
+                        // Only if the deleted key is still the one shown.
+                        if this.key.as_ref() == Some(&key) {
+                            this.key = None;
+                            this.loaded = None;
+                            this.text = None;
+                        }
                         cx.emit(ValueEvent::Deleted(key));
                     }
                     Err(err) => window.push_notification(
@@ -328,20 +291,9 @@ impl ValuePanel {
 
     fn select_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_row = Some(ix);
-        let bytes = self.loaded.as_ref().and_then(|l| row_value(&l.data, ix));
-        self.text = bytes.map(|b| self.text_view(&b, false, window, cx));
+        let value = self.loaded.as_ref().and_then(|l| l.row_text(ix));
+        self.text = value.map(|value| self.text_view(value, window, cx));
         cx.notify();
-    }
-
-    fn columns(ty: &KeyType) -> (&'static str, &'static str, f32) {
-        match ty {
-            KeyType::Hash => ("Field", "Value", 0.35),
-            KeyType::List => ("#", "Value", 0.0),
-            KeyType::Set => ("", "Member", 0.0),
-            KeyType::ZSet => ("Score", "Member", 0.0),
-            KeyType::Stream => ("ID", "Fields", 0.0),
-            _ => ("", "", 0.0),
-        }
     }
 
     fn render_header(&self, loaded: Option<&Loaded>, cx: &Context<Self>) -> impl IntoElement {
@@ -351,13 +303,19 @@ impl ValuePanel {
             .as_ref()
             .map(|k| format::bytes_inline(k).into_owned())
             .unwrap_or_default();
-        let summary = loaded.and_then(|l| match l.meta.ty {
-            KeyType::String | KeyType::Json => Some(format::size(l.total)),
-            KeyType::Other(_) | KeyType::None => None,
-            _ => Some(format!("{} items", format::count(l.total))),
-        });
-        let ttl = loaded.map(|l| format::ttl(l.meta.ttl_ms).unwrap_or_else(|| "No expiry".into()));
-        let saveable = self.text.as_ref().is_some_and(|t| t.editable && t.dirty);
+        // A binary name is copied quoted, so it pastes into the console as
+        // the same bytes.
+        let copied = self
+            .key
+            .as_ref()
+            .map(|k| format::copyable(k).into_owned())
+            .unwrap_or_default();
+        let summary = loaded.and_then(Loaded::summary);
+        let ttl = loaded.map(Loaded::ttl_text);
+        let saveable = self
+            .text
+            .as_ref()
+            .is_some_and(|t| t.value.editable && t.dirty);
 
         h_flex()
             .gap_2()
@@ -386,7 +344,7 @@ impl ValuePanel {
                     .icon(IconName::Copy)
                     .tooltip("Copy key name")
                     .on_click(move |_, window, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(key.clone()));
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
                         window.push_notification("Key name copied", cx);
                     }),
             )
@@ -433,20 +391,24 @@ impl ValuePanel {
                     .tooltip("Reload value")
                     .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
             )
-            .child(
-                Button::new("delete")
-                    .small()
-                    .map(|b| {
-                        if self.confirm_delete {
-                            b.danger().label("Delete?")
-                        } else {
-                            b.ghost()
-                        }
-                    })
-                    .icon(gpui_kit::assets::IconName::Trash)
-                    .tooltip("Delete key (⌘⌫)")
-                    .on_click(cx.listener(|this, _, window, cx| this.request_delete(window, cx))),
-            )
+            .when(!self.read_only(), |this| {
+                this.child(
+                    Button::new("delete")
+                        .small()
+                        .map(|b| {
+                            if self.confirm_delete {
+                                b.danger().label("Delete?")
+                            } else {
+                                b.ghost()
+                            }
+                        })
+                        .icon(gpui_kit::assets::IconName::Trash)
+                        .tooltip("Delete key (⌘⌫)")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.request_delete(window, cx)),
+                        ),
+                )
+            })
     }
 
     fn render_rows(
@@ -458,11 +420,11 @@ impl ValuePanel {
         let Some(loaded) = self.loaded.as_ref() else {
             return Vec::new();
         };
-        let (_, _, first_ratio) = Self::columns(&loaded.meta.ty);
+        let share = loaded.columns().first_share;
         let mono = theme.mono_font_family.clone();
         range
             .map(|ix| {
-                let (first, second) = row_cells(&loaded.data, ix);
+                let (first, second) = loaded.row_cells(ix);
                 let selected = self.selected_row == Some(ix);
                 h_flex()
                     .id(ix)
@@ -484,8 +446,10 @@ impl ValuePanel {
                     .when_some(first, |this, first| {
                         this.child(
                             div()
-                                .when(first_ratio > 0.0, |d| d.w(gpui_kit::relative(first_ratio)))
-                                .when(first_ratio == 0.0, |d| d.w(px(150.)))
+                                .map(|d| match share {
+                                    Some(share) => d.w(gpui_kit::relative(share)),
+                                    None => d.w(px(NARROW_COLUMN)),
+                                })
                                 .flex_none()
                                 .truncate()
                                 .text_color(theme.muted_foreground)
@@ -499,8 +463,8 @@ impl ValuePanel {
 
     fn render_collection(&self, loaded: &Loaded, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (first, second, first_ratio) = Self::columns(&loaded.meta.ty);
-        let count = loaded.data.len();
+        let columns = loaded.columns();
+        let count = loaded.row_count();
         v_flex()
             .flex_1()
             .min_h_0()
@@ -516,16 +480,18 @@ impl ValuePanel {
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
-                    .when(!first.is_empty(), |this| {
+                    .when_some(columns.first, |this, first| {
                         this.child(
                             div()
-                                .when(first_ratio > 0.0, |d| d.w(gpui_kit::relative(first_ratio)))
-                                .when(first_ratio == 0.0, |d| d.w(px(150.)))
+                                .map(|d| match columns.first_share {
+                                    Some(share) => d.w(gpui_kit::relative(share)),
+                                    None => d.w(px(NARROW_COLUMN)),
+                                })
                                 .flex_none()
                                 .child(first),
                         )
                     })
-                    .child(div().flex_1().child(second)),
+                    .child(div().flex_1().child(columns.second)),
             )
             .child(
                 div()
@@ -557,12 +523,8 @@ impl ValuePanel {
                     .border_color(theme.border)
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(format!(
-                        "Showing {} of {}",
-                        format::count(count as u64),
-                        format::count(loaded.total)
-                    ))
-                    .when(loaded.next.is_some(), |this| {
+                    .child(loaded.footer())
+                    .when(loaded.has_more(), |this| {
                         this.child(
                             Button::new("more")
                                 .outline()
@@ -575,6 +537,34 @@ impl ValuePanel {
                         )
                     }),
             )
+    }
+
+    fn render_text(&self, loaded: &Loaded, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .when_some(loaded.preview_notice(), |this, notice| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .bg(theme.warning.opacity(0.12))
+                        .text_color(theme.warning)
+                        .child(notice),
+                )
+            })
+            .when_some(self.text.as_ref(), |this, text| {
+                this.child(
+                    div().flex_1().min_h_0().child(
+                        Editor::new(&text.editor)
+                            .readonly(!text.value.editable)
+                            .bordered(false)
+                            .h_full(),
+                    ),
+                )
+            })
     }
 }
 
@@ -660,107 +650,4 @@ impl Render for ValuePanel {
             .child(body)
             .into_any_element()
     }
-}
-
-impl ValuePanel {
-    fn render_text(&self, loaded: &Loaded, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let shown = match &loaded.data {
-            ValueData::String(b) => b.len() as u64,
-            _ => loaded.total,
-        };
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .when(shown < loaded.total, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .bg(theme.warning.opacity(0.12))
-                        .text_color(theme.warning)
-                        .child(format!(
-                            "Showing the first {} of {}. Large values are read-only.",
-                            format::size(shown),
-                            format::size(loaded.total)
-                        )),
-                )
-            })
-            .when_some(self.text.as_ref(), |this, text| {
-                this.child(
-                    div().flex_1().min_h_0().child(
-                        Editor::new(&text.editor)
-                            .readonly(!text.editable)
-                            .bordered(false)
-                            .h_full(),
-                    ),
-                )
-            })
-    }
-}
-
-fn pretty_json(bytes: &[u8]) -> Option<String> {
-    let first = bytes.iter().find(|b| !b.is_ascii_whitespace())?;
-    if !matches!(first, b'{' | b'[') {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    serde_json::to_string_pretty(&value).ok()
-}
-
-fn cell(bytes: &[u8]) -> SharedString {
-    let end = bytes.len().min(CELL_PREVIEW);
-    format::bytes_inline(&bytes[..end]).into_owned().into()
-}
-
-/// The (optional first column, second column) text of row `ix`.
-fn row_cells(data: &ValueData, ix: usize) -> (Option<SharedString>, SharedString) {
-    match data {
-        ValueData::Hash(pairs) => (Some(cell(&pairs[ix].0)), cell(&pairs[ix].1)),
-        ValueData::List(items) => (Some(ix.to_string().into()), cell(&items[ix])),
-        ValueData::Set(items) => (None, cell(&items[ix])),
-        ValueData::ZSet(members) => (Some(members[ix].1.to_string().into()), cell(&members[ix].0)),
-        ValueData::Stream(entries) => {
-            let entry = &entries[ix];
-            let mut fields = String::new();
-            for (k, v) in &entry.fields {
-                if fields.len() > CELL_PREVIEW {
-                    break;
-                }
-                if !fields.is_empty() {
-                    fields.push_str("  ");
-                }
-                fields.push_str(&format::bytes_inline(k));
-                fields.push('=');
-                fields.push_str(&format::bytes_inline(v));
-            }
-            (Some(entry.id.clone().into()), fields.into())
-        }
-        _ => (None, SharedString::default()),
-    }
-}
-
-/// The full value of row `ix`, for the detail pane.
-fn row_value(data: &ValueData, ix: usize) -> Option<Vec<u8>> {
-    Some(match data {
-        ValueData::Hash(pairs) => pairs.get(ix)?.1.clone(),
-        ValueData::List(items) | ValueData::Set(items) => items.get(ix)?.clone(),
-        ValueData::ZSet(members) => members.get(ix)?.0.clone(),
-        ValueData::Stream(entries) => {
-            let entry = entries.get(ix)?;
-            let object: serde_json::Map<String, serde_json::Value> = entry
-                .fields
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        format::bytes(k).into_owned(),
-                        format::bytes(v).into_owned().into(),
-                    )
-                })
-                .collect();
-            serde_json::to_vec(&object).ok()?
-        }
-        _ => return None,
-    })
 }

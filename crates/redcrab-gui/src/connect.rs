@@ -4,9 +4,10 @@ use gpui_kit::{
     AppContext as _, ClickEvent, Context, Entity, EventEmitter, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    base::Selectable as _,
     component::{
         ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _,
-        button::{Button, ButtonVariants as _},
+        button::{Button, ButtonGroup, ButtonVariants as _},
         checkbox::Checkbox,
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -18,7 +19,9 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px,
 };
-use redcrab_core::{Client, ConnectionConfig, TlsConfig, format, store};
+use redcrab_core::{Client, ConnectionConfig, Environment, TlsConfig, format, store};
+
+use crate::style;
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_NOTE: &str =
@@ -57,6 +60,8 @@ pub struct ConnectView {
     tls_ca: Entity<InputState>,
     tls_cert: Entity<InputState>,
     tls_key: Entity<InputState>,
+    read_only: bool,
+    environment: Environment,
     busy: bool,
     error: Option<SharedString>,
     _task: Option<Task<()>>,
@@ -114,6 +119,8 @@ impl ConnectView {
             tls_ca,
             tls_cert,
             tls_key,
+            read_only: false,
+            environment: Environment::None,
             busy: false,
             error: None,
             _task: None,
@@ -122,6 +129,10 @@ impl ConnectView {
         };
         match start {
             Start::Connect(config) => {
+                // Running the same URL again must not undo the read-only flag
+                // or environment the user set on the connection it saved.
+                let config = config.with_saved(&this.saved);
+                this.selected = this.saved.iter().position(|c| c.name == config.name);
                 this.fill(&config, window, cx);
                 this.connect(window, cx);
             }
@@ -173,6 +184,8 @@ impl ConnectView {
         set(&self.tls_key, path(&tls.client_key_file), window, cx);
         self.tls = config.tls.is_some();
         self.tls_insecure = tls.insecure;
+        self.read_only = config.read_only;
+        self.environment = config.environment;
         self.error = None;
         cx.notify();
     }
@@ -212,25 +225,14 @@ impl ConnectView {
                 .chars()
                 .next()
                 .unwrap_or(defaults.separator),
+            read_only: self.read_only,
+            environment: self.environment,
         })
     }
 
     fn remember(&mut self, config: &ConnectionConfig) {
         // The list never holds passwords; they go to the credential store.
-        let config = &ConnectionConfig {
-            password: None,
-            ..config.clone()
-        };
-        match self.saved.iter().position(|c| c.name == config.name) {
-            Some(ix) => {
-                self.saved[ix] = config.clone();
-                self.selected = Some(ix);
-            }
-            None => {
-                self.saved.insert(0, config.clone());
-                self.selected = Some(0);
-            }
-        }
+        self.selected = Some(store::remember(&mut self.saved, config));
         if let Err(err) = store::save_connections(&self.saved) {
             tracing::warn!("could not save connections: {err:#}");
         }
@@ -309,15 +311,15 @@ impl ConnectView {
                 }
                 match result {
                     Ok((client, latency, info)) if test_only => {
+                        // What the user may not read (INFO, DBSIZE) is left out.
+                        let facts = [
+                            info.server_label(),
+                            info.db_size.map(|n| format!("{} keys", format::count(n))),
+                            Some(format!("{:.1} ms", latency.as_secs_f64() * 1000.0)),
+                        ];
+                        let facts: Vec<String> = facts.into_iter().flatten().collect();
                         window.push_notification(
-                            Notification::success(format!(
-                                "Redis {} ({}) · {} keys · {:.1} ms",
-                                info.version,
-                                info.mode,
-                                format::count(info.db_size),
-                                latency.as_secs_f64() * 1000.0
-                            ))
-                            .title("Connection OK"),
+                            Notification::success(facts.join(" · ")).title("Connection OK"),
                             cx,
                         );
                         drop(client);
@@ -440,7 +442,21 @@ impl ConnectView {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_sm().truncate().child(config.name.clone()))
+                                    .child(
+                                        h_flex()
+                                            .gap_1p5()
+                                            .min_w_0()
+                                            .when_some(
+                                                style::environment_color(config.environment, cx),
+                                                |this, color| this.child(style::dot(color)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .truncate()
+                                                    .child(config.name.clone()),
+                                            ),
+                                    )
                                     .child(
                                         h_flex()
                                             .gap_1()
@@ -453,9 +469,14 @@ impl ConnectView {
                                                 )
                                             })
                                             .child(div().truncate().child(format!(
-                                                "{} · db{}",
+                                                "{} · db{}{}",
                                                 config.address(),
-                                                config.db
+                                                config.db,
+                                                if config.read_only {
+                                                    " · read-only"
+                                                } else {
+                                                    ""
+                                                }
                                             ))),
                                     ),
                             )
@@ -594,6 +615,61 @@ impl ConnectView {
             })
     }
 
+    /// Environment tag and read-only switch: guard rails for servers that
+    /// matter.
+    fn render_safety(&self, cx: &Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(Label::new("Environment").text_sm())
+                    .child(
+                        ButtonGroup::new("environment")
+                            .outline()
+                            .small()
+                            .children(Environment::ALL.into_iter().enumerate().map(
+                                |(ix, environment)| {
+                                    Button::new(("environment", ix))
+                                        .label(environment.label())
+                                        .selected(self.environment == environment)
+                                },
+                            ))
+                            .on_click(cx.listener(|this, clicked: &Vec<usize>, _, cx| {
+                                if let Some(&environment) =
+                                    clicked.first().and_then(|&ix| Environment::ALL.get(ix))
+                                {
+                                    this.environment = environment;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Tags the window with a colored bar, e.g. red for production."),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Checkbox::new("read-only")
+                            .label("Read-only")
+                            .checked(self.read_only)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.read_only = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(div().pl_6().text_xs().text_color(muted).child(
+                        "Blocks every change to the server, in the app and in the console.",
+                    )),
+            )
+    }
+
     fn field(label: &'static str, input: &Entity<InputState>) -> impl IntoElement {
         v_flex()
             .gap_1()
@@ -674,6 +750,8 @@ impl Render for ConnectView {
                             .child("Splits key names into folders, e.g. user:42:profile."),
                     ),
             )
+            .child(div().h(px(1.)).bg(theme.border))
+            .child(self.render_safety(cx))
             .child(div().h(px(1.)).bg(theme.border))
             .child(self.render_tls(cx))
             .when_some(self.error.clone(), |this, error| {
