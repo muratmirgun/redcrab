@@ -5161,6 +5161,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre-apple",
  "redcrab-core",
+ "resvg 0.46.0",
  "serde_json",
  "tracing",
  "tracing-subscriber",

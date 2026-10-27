@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>redcrab</title>
+  <!-- One color; the shell's top edge is a cut so it reads without the second tone. -->
+  <defs>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M34,62 A30,9 0 0 0 94,62 M34,70.5 A30,9 0 0 0 94,70.5 M34,78.5 A30,9 0 0 0 94,78.5" stroke="#000" stroke-width="3" fill="none"/>
+      <circle cx="52.8" cy="39.6" r="2.1" fill="#000"/>
+      <circle cx="75.2" cy="39.6" r="2.1" fill="#000"/>
+    </mask>
+    <g id="half">
+      <path d="M40,84 L27,95 M44,89 L34,101" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+      <path d="M38,67 Q24,68 21,57" stroke-width="7" stroke-linecap="round" fill="none"/>
+      <path d="M20,44 L32.36,37.43 A14,14 0 1 1 20.49,30.01 Z" stroke="none"/>
+      <path d="M55,57 L52,44" stroke-width="4.5" stroke-linecap="round"/>
+      <circle cx="51.5" cy="41" r="6" stroke="none"/>
+    </g>
+  </defs>
+  <g mask="url(#cut)" fill="#E5432D" stroke="#E5432D">
+    <use href="#half"/>
+    <use href="#half" transform="translate(128,0) scale(-1,1)"/>
+    <path d="M34,62 L34,86 A30,9 0 0 0 94,86 L94,62 A30,9 0 0 0 34,62 Z" stroke="none"/>
+  </g>
+</svg>

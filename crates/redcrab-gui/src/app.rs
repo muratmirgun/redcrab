@@ -8,6 +8,7 @@ use gpui_kit::{
     },
     div,
     prelude::FluentBuilder as _,
+    px, rgb, svg,
 };
 use redcrab_core::{Client, ConnectionConfig};
 
@@ -15,6 +16,9 @@ use crate::{
     connect::{ConnectEvent, ConnectView, Start},
     workspace::{Workspace, WorkspaceEvent},
 };
+
+/// The logo red, `#E5432D`.
+const BRAND_RED: u32 = 0xE5432D;
 
 enum Screen {
     Connect(Entity<ConnectView>),
@@ -116,6 +120,12 @@ impl Render for RedcrabApp {
                         h_flex()
                             .gap_2()
                             .text_sm()
+                            .child(
+                                svg()
+                                    .path(crate::assets::LOGO)
+                                    .size(px(18.))
+                                    .text_color(rgb(BRAND_RED)),
+                            )
                             .child(div().font_weight(FontWeight::SEMIBOLD).child("redcrab"))
                             .when_some(connection, |this, connection| {
                                 this.child(

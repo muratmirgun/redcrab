@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>redcrab</title>
+  <!-- Simplified for 16 and 32 px: no eyes or shell bands, heavier strokes, a larger mark. -->
+  <defs>
+    <g id="half">
+      <path d="M40,84 L27,95 M44,89 L34,101" stroke-width="7" stroke-linecap="round" fill="none"/>
+      <path d="M38,67 Q24,68 21,57" stroke-width="9" stroke-linecap="round" fill="none"/>
+      <path d="M20,44 L32.36,37.43 A14,14 0 1 1 20.49,30.01 Z" stroke="none"/>
+    </g>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#E5432D"/>
+  <g transform="translate(118.4,103) scale(6.15)">
+    <g fill="#FFFFFF" stroke="#FFFFFF">
+      <use href="#half"/>
+      <use href="#half" transform="translate(128,0) scale(-1,1)"/>
+      <path d="M34,62 L34,86 A30,9 0 0 0 94,86 L94,62 A30,9 0 0 0 34,62 Z" stroke="none"/>
+    </g>
+  </g>
+</svg>
