@@ -9,6 +9,25 @@
   GPU-rendered with <a href="https://www.gpui.rs">GPUI</a> via <a href="https://gpui-kit.com">GPUI Kit</a>; a terminal UI on the same core is planned.
 </p>
 
+## Install
+
+Download a package from [Releases](https://github.com/muratmirgun/redcrab/releases):
+
+| Platform | Package |
+| --- | --- |
+| macOS 11 or later, Apple silicon and Intel | `redcrab-<version>-macos-universal.dmg` |
+| Debian 12+, Ubuntu 22.04+ | `redcrab_<version>_amd64.deb` or `_arm64.deb`: `sudo apt install ./redcrab_*.deb` |
+| Other Linux with glibc 2.35+ | `redcrab-<version>-linux-<arch>.tar.gz`: run `./redcrab`; copy its `share/` into `~/.local/share` for a menu entry |
+| Windows 10 and 11, x86_64 | `redcrab-<version>-windows-x86_64.zip` |
+
+`SHA256SUMS` lists every file's checksum (`sha256sum -c SHA256SUMS`).
+
+- **macOS:** the app is not notarized yet, so the first start needs a right-click on
+  redcrab.app, then **Open** (or `xattr -dr com.apple.quarantine /Applications/redcrab.app`).
+- **Windows:** the executable is not code-signed yet; SmartScreen may say "Windows
+  protected your PC": **More info**, then **Run anyway**.
+- **Linux:** drawing needs a Vulkan driver (`mesa-vulkan-drivers` on most systems).
+
 ## Why
 
 Existing free clients are Electron or webview apps. redcrab aims to stay instant on
@@ -170,8 +189,25 @@ Shortcuts use <kbd>⌘</kbd> on macOS and <kbd>Ctrl</kbd> on Linux and Windows
 | `redcrab-gui`  | The desktop app (`redcrab` binary). |
 
 Logo sources live in [`assets/logo`](assets/logo): `mark.svg` (two-tone), `mark-mono.svg`
-(one color), and the macOS app icon (`icon.svg`, `icon-small.svg` for 16/32 px).
-`assets/logo/build-icns.sh` regenerates `icon.icns` and `icon.png` from them.
+(one color), and the app icon (`icon.svg`, with `icon-small.svg` for 16 and 32 px).
+`assets/logo/build-icons.sh` regenerates `icon.icns` (macOS), `icon.ico` (Windows) and
+`icon.png` from them; Linux packages render their PNGs at packaging time.
+
+## Packaging
+
+`scripts/package/{macos,linux,windows}.sh` build the packages for the machine they run
+on into `dist/`, each with a `.sha256` file, and check that the result starts
+(`redcrab --version`):
+
+```sh
+scripts/package/macos.sh                       # .app in a .dmg, this Mac's architecture
+TARGETS="aarch64-apple-darwin x86_64-apple-darwin" scripts/package/macos.sh   # universal
+scripts/package/linux.sh                       # .tar.gz and .deb (needs dpkg-dev)
+scripts/package/windows.sh                     # .zip, in Git Bash
+```
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs them on every platform
+for a version tag and drafts the GitHub release; see [RELEASING.md](RELEASING.md).
 
 ## Development
 

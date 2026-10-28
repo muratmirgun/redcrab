@@ -33,3 +33,6 @@ gpui-pre-apple = { version = "=0.3.10", optional = true }
 [dev-dependencies]
 # Renders the app icon sizes for assets/logo/build-icns.sh.
 resvg = { version = "0.46", default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"

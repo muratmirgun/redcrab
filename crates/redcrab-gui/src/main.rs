@@ -1,3 +1,9 @@
+// Release builds are GUI-only on Windows: no console window next to the app.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod assets;
 mod bulk;
@@ -50,11 +56,14 @@ fn main() {
         )
         .init();
 
+    let arg = std::env::args().nth(1);
+    if let Some("--version" | "-V") = arg.as_deref() {
+        println!("redcrab {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     // `redcrab redis://user:pass@host:port/db` connects right away.
-    let start = match std::env::args()
-        .nth(1)
-        .map(|url| ConnectionConfig::parse_url(&url))
-    {
+    let start = match arg.map(|url| ConnectionConfig::parse_url(&url)) {
         Some(Ok(config)) => Start::Connect(config),
         Some(Err(err)) => {
             eprintln!("redcrab: {err:#}");
@@ -100,6 +109,8 @@ fn open_main_window(start: Start, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
         window_min_size: Some(size(px(860.), px(520.))),
+        // Matches the .desktop file, so Linux docks show the right icon.
+        app_id: Some("redcrab".into()),
         ..TitleBar::window_options()
     };
     if let Err(err) = gpui_kit::open_window(options, cx, |window, cx| {

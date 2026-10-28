@@ -1,0 +1,227 @@
+# Builds the packages for every platform with scripts/package/*.sh and, for a
+# version tag, attaches them to a draft GitHub release to review and publish.
+#
+#   git tag v0.1.0 && git push origin v0.1.0     # tag must match Cargo.toml
+#
+# Pushes to main that touch the packaging run the same builds without
+# publishing, so a broken package shows up before the next release.
+#
+# macOS signing is optional and switches on with repository secrets (see
+# RELEASING.md); without them the app is ad-hoc signed.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - scripts/package/**
+      - .github/workflows/release.yml
+      - assets/logo/**
+      - crates/redcrab-gui/build.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_TOOLCHAIN: "1.99"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      # A throwaway keychain holding the Developer ID certificate, only when
+      # the secrets exist. The identity it finds is what the script signs with.
+      - name: Import the signing certificate
+        if: env.APPLE_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          base64 --decode <<<"$APPLE_CERTIFICATE" >"$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # Keeps the existing keychains searchable; their paths have no spaces.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -n 1)
+          [ -n "$identity" ] || { echo "no Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "APPLE_SIGNING_IDENTITY=$identity" >>"$GITHUB_ENV"
+
+      - name: Write the notary key
+        if: env.APPLE_NOTARY_KEY_P8 != ''
+        run: |
+          printf '%s' "$APPLE_NOTARY_KEY_P8" >"$RUNNER_TEMP/notary.p8"
+          echo "APPLE_NOTARY_KEY=$RUNNER_TEMP/notary.p8" >>"$GITHUB_ENV"
+
+      - name: Package
+        env:
+          TARGETS: aarch64-apple-darwin x86_64-apple-darwin
+        run: scripts/package/macos.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    # 22.04 on purpose: the binary needs at least the glibc it was built
+    # against (2.35), which covers Ubuntu 22.04+, Debian 12+ and the like.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      # GPUI's build dependencies (see ci.yml) plus dpkg-dev for
+      # dpkg-shlibdeps and desktop-file-utils to validate the .desktop file.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig-dev libfreetype-dev dpkg-dev desktop-file-utils
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Package
+        run: scripts/package/linux.sh
+
+      # The .deb must install with its declared dependencies and run.
+      - name: Install the .deb
+        run: |
+          sudo apt-get install -y ./dist/redcrab_*.deb
+          redcrab --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Package
+        run: scripts/package/windows.sh
+
+      # The zip must hold the executable with its resources compiled in: the
+      # version block below comes from the same resource script as the icon.
+      - name: Check the package
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP/check"
+          $exe = Get-ChildItem "$env:RUNNER_TEMP/check" -Recurse -Filter redcrab.exe | Select-Object -First 1
+          if (-not $exe) { throw "redcrab.exe is missing from $($zip.Name)" }
+          $info = $exe.VersionInfo
+          "$($info.ProductName) $($info.ProductVersion): $($info.FileDescription)"
+          if ($info.ProductName -ne "redcrab") { throw "version resource missing" }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Draft the GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          cat ./*.sha256 >SHA256SUMS
+          rm ./*.sha256
+          sha256sum -c SHA256SUMS
+
+      # A draft, so the notes and files can be checked before publishing.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --draft --verify-tag --generate-notes \
+            --title "redcrab ${GITHUB_REF_NAME#v}"
