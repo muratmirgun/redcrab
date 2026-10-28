@@ -362,6 +362,15 @@ impl Client {
             }
             None => None,
         };
+        Self::connect_single_over(config, tunnel).await
+    }
+
+    /// [`Self::connect_single`] through `tunnel`, already open when the
+    /// connection has one.
+    async fn connect_single_over(
+        config: Arc<ConnectionConfig>,
+        tunnel: Option<Arc<Tunnel>>,
+    ) -> Result<(Self, bool)> {
         // Reads certificate files, so it runs here rather than on the caller's thread.
         let client = match &tunnel {
             Some(tunnel) => config.client_for(Target::Tunnel(tunnel.local_addr()))?,
@@ -580,6 +589,39 @@ mod tests {
             "{err}"
         );
         assert!(!err.contains("could not open a connection"), "{err}");
+    }
+
+    #[test]
+    fn another_database_goes_through_the_same_tunnel() {
+        let Some(client) = tunneled("another_database_goes_through_the_same_tunnel") else {
+            return;
+        };
+        // The client trusts only the pinned key file. A new login with the
+        // default files (~/.ssh/known_hosts and redcrab's own) would refuse
+        // the server, or record its key outside the pinned file.
+        let other = block_on(client.with_db(3)).expect("switching through the tunnel");
+        assert_eq!(other.config().db, 3);
+        let (Some(mine), Some(theirs)) = (
+            client.connector.shared_tunnel(),
+            other.connector.shared_tunnel(),
+        ) else {
+            panic!("no tunnel");
+        };
+        assert!(Arc::ptr_eq(mine, theirs), "a second SSH login");
+        block_on(other.ping()).unwrap();
+        // The new client is on its database; the old one stays on its own.
+        let db = |client: &Client| match block_on(client.console().exec(["CLIENT", "INFO"])) {
+            Ok(Value::BulkString(info)) => String::from_utf8(info)
+                .unwrap()
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("db=").map(str::to_string)),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(db(&other).as_deref(), Some("3"));
+        assert_eq!(db(&client).as_deref(), Some("0"));
+        // The tunnel outlives the client that opened it.
+        drop(client);
+        block_on(other.ping()).unwrap();
     }
 
     #[test]

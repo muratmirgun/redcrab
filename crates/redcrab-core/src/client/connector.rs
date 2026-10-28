@@ -111,8 +111,13 @@ impl Connector {
     }
 
     pub(crate) fn tunnel(&self) -> Option<&Tunnel> {
+        self.shared_tunnel().map(|tunnel| &**tunnel)
+    }
+
+    /// The SSH tunnel, to share with another client of the same server.
+    pub(crate) fn shared_tunnel(&self) -> Option<&Arc<Tunnel>> {
         match self {
-            Self::Direct { tunnel, .. } => tunnel.as_deref(),
+            Self::Direct { tunnel, .. } => tunnel.as_ref(),
             _ => None,
         }
     }

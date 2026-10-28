@@ -1,6 +1,6 @@
 //! The numbered databases of a server, and switching between them.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context as _, Result, anyhow};
 use redis::{Value, cmd, pipe};
@@ -103,15 +103,38 @@ impl Client {
     /// client stays on its database. Not for a cluster, which has database
     /// 0 only: the server refuses any other ("SELECT is not allowed in
     /// cluster mode").
+    ///
+    /// Through an SSH tunnel the new client shares this one's tunnel: no
+    /// second login, and the host key stays checked against the known_hosts
+    /// files and agent this client was connected with
+    /// ([`ConnectOptions`](super::ConnectOptions)), not the defaults.
     pub fn with_db(&self, db: u32) -> impl Future<Output = Result<Client>> + Send + 'static {
         let config = ConnectionConfig {
             db,
             ..(*self.config).clone()
         };
+        let tunnel = self.connector.shared_tunnel().cloned();
         async move {
-            Client::connect(config)
-                .await
-                .with_context(|| format!("could not switch to database {db}"))
+            let client = match tunnel {
+                Some(tunnel) => {
+                    spawn(async move {
+                        config.validate()?;
+                        let (client, cluster_node) =
+                            Client::connect_single_over(Arc::new(config), Some(tunnel)).await?;
+                        // As `Client::connect` says for a cluster node
+                        // behind a tunnel.
+                        anyhow::ensure!(
+                            !cluster_node,
+                            "{} is a node of a Redis Cluster, which redcrab cannot reach through an SSH tunnel yet",
+                            client.config.route_label()
+                        );
+                        Ok(client)
+                    })
+                    .await
+                }
+                None => Client::connect(config).await,
+            };
+            client.with_context(|| format!("could not switch to database {db}"))
         }
     }
 }
