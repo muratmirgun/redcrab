@@ -33,7 +33,7 @@ use crate::{
     Collapse, Expand, SelectNext, SelectPrev,
     bulk::{BulkDeleteView, BulkEvent},
     edit::{self, ChangeForm, OnDone},
-    shortcuts, style,
+    settings, shortcuts, style,
 };
 
 const ROW_HEIGHT: f32 = 26.;
@@ -135,11 +135,9 @@ impl KeyBrowser {
         this
     }
 
+    /// The limits come from the settings when a scan starts.
     fn model(client: &Client) -> browser::KeyBrowser {
-        browser::KeyBrowser::new(
-            client.config().separator_byte(),
-            Some(browser::DEFAULT_KEY_LIMIT),
-        )
+        browser::KeyBrowser::new(client.config().separator_byte(), None)
     }
 
     fn read_only(&self) -> bool {
@@ -169,6 +167,25 @@ impl KeyBrowser {
     /// Fetches the databases and their sizes for the switcher. The
     /// workspace calls this as it polls the server's stats; deletes call it
     /// to show the new sizes right away.
+    /// The databases the switcher offers: the first 64, the current one,
+    /// and any other that holds keys. Empty when there is nothing to switch
+    /// to (a cluster, or a server with one database).
+    pub fn listed_databases(&self) -> Vec<DbInfo> {
+        if self.databases.len() < 2 {
+            return Vec::new();
+        }
+        let current = self.client.config().db;
+        self.databases
+            .iter()
+            .filter(|info| {
+                info.index < LISTED_DATABASES
+                    || info.index == current
+                    || info.keys.is_some_and(|keys| keys > 0)
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn refresh_databases(&mut self, cx: &mut Context<Self>) {
         // A cluster has database 0 only: no switcher to fill.
         if !self.client.topology().supports_databases() {
@@ -211,6 +228,9 @@ impl KeyBrowser {
 
     pub fn rescan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().to_string();
+        let settings = settings::get(cx);
+        self.model
+            .set_scan_limits(Some(settings.key_limit), settings.scan_count);
         let request = self.model.begin_scan(&query);
         let generation = request.generation;
         let mut events = self.client.scan_into(request.tree, request.options);
@@ -740,16 +760,7 @@ impl KeyBrowser {
                 .find(|info| info.index == current)
                 .map_or_else(|| format!("db{current}"), DbInfo::label),
         };
-        let listed: Vec<DbInfo> = self
-            .databases
-            .iter()
-            .filter(|info| {
-                info.index < LISTED_DATABASES
-                    || info.index == current
-                    || info.keys.is_some_and(|keys| keys > 0)
-            })
-            .cloned()
-            .collect();
+        let listed = self.listed_databases();
         let view = cx.weak_entity();
         Some(
             h_flex()

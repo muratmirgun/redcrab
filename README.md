@@ -32,8 +32,8 @@ Download a package from [Releases](https://github.com/muratmirgun/redcrab/releas
 
 From 0.2.0 on, redcrab looks for a new release when it starts and once a day after,
 and asks before it installs one: **Install and Restart**, **Later**, or **Skip This
-Version**. The title bar's ⋮ menu checks right away or turns the daily check off;
-`REDCRAB_NO_UPDATE_CHECK=1` turns it off as well. Only the GitHub API is asked, and
+Version**. The title bar's ⋮ menu (or the command palette) checks right away, and
+**Settings** turns the daily check off; so does `REDCRAB_NO_UPDATE_CHECK=1`. Only the GitHub API is asked, and
 nothing about you or your connections is sent.
 
 An update installs only if `SHA256SUMS` carries the release key's Ed25519 signature
@@ -196,6 +196,26 @@ suggestions or stops a running command, and <kbd>⌘K</kbd> clears the log.
 
 Shortcuts use <kbd>⌘</kbd> on macOS and <kbd>Ctrl</kbd> on Linux and Windows
 (<kbd>Ctrl</kbd>+<kbd>J</kbd>, <kbd>Ctrl</kbd>+<kbd>S</kbd>, ...).
+
+## Command palette and settings
+
+<kbd>⌘K</kbd> opens the command palette: everything the window can do, with its
+shortcut, found by typing a few letters. Refresh or search the keys, add or delete one,
+open the console, switch to another database, disconnect, connect to a saved connection
+(in a new window when one is open), change the theme, look for updates. In the console
+<kbd>⌘K</kbd> clears the log, as in a terminal; <kbd>⇧⌘P</kbd> opens the palette from
+anywhere.
+
+<kbd>⌘,</kbd> opens the settings, which are saved as `settings.json` next to the saved
+connections:
+
+| Setting | Default | |
+| --- | --- | --- |
+| Theme | System | System follows the light or dark mode of the OS as it changes. The title bar's sun/moon picks one and keeps it. |
+| Text size | Medium | Small, Medium or Large; the whole interface scales with it. |
+| Load at most | 2,000,000 keys | Where a scan of the key list stops (about 60 bytes per key). A filter finds keys past it. |
+| Keys per SCAN | 2,000 | The `COUNT` of each `SCAN`: smaller keeps each round trip short on a busy server, larger loads faster. |
+| Check for updates automatically | On | Packaged builds only. |
 
 ## Layout
 

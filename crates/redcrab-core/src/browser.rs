@@ -171,6 +171,8 @@ pub struct Selection {
 pub struct KeyBrowser {
     separator: u8,
     limit: Option<usize>,
+    /// The COUNT hint of each SCAN round trip.
+    count: u32,
     tree: Arc<Mutex<KeyTree>>,
     /// Flattened rows, rebuilt in place when `rows_dirty`.
     rows: Vec<Row>,
@@ -198,6 +200,7 @@ impl KeyBrowser {
         Self {
             separator,
             limit,
+            count: ScanOptions::default().count,
             tree: Arc::new(Mutex::new(KeyTree::new(Some(separator)))),
             rows: Vec::new(),
             rows_dirty: false,
@@ -221,8 +224,16 @@ impl KeyBrowser {
     pub fn reset(&mut self, separator: u8) {
         *self = Self {
             generation: self.generation + 1,
+            count: self.count,
             ..Self::new(separator, self.limit)
         };
+    }
+
+    /// What the next scan loads at most, and the COUNT it asks SCAN for per
+    /// round trip. A scan already running keeps its own.
+    pub fn set_scan_limits(&mut self, limit: Option<usize>, count: u32) {
+        self.limit = limit;
+        self.count = count;
     }
 
     fn tree(&self) -> MutexGuard<'_, KeyTree> {
@@ -256,6 +267,7 @@ impl KeyBrowser {
             options: ScanOptions {
                 pattern,
                 limit: self.limit,
+                count: self.count,
                 ..ScanOptions::default()
             },
         }

@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+
 use gpui_kit::{
-    AppContext as _, ClickEvent, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, FontWeight, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Subscription,
+    WeakEntity, Window, WindowId,
+    assets::IconName as Lucide,
     component::{
-        ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode, TitleBar,
+        ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, WindowExt as _,
         button::{Button, ButtonVariants as _},
         h_flex,
         menu::{DropdownMenu as _, PopupMenuItem},
@@ -12,14 +16,43 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px, rgb, svg,
 };
-use redcrab_core::{Client, ConnectionConfig, Environment};
+use redcrab_core::{Client, ConnectionConfig, Environment, format, settings::Appearance, store};
 
 use crate::{
+    DeleteKey, FocusSearch, NewKey, NewWindow, OpenSettings, Quit, Refresh, SaveValue,
+    ToggleConsole,
     connect::{ConnectEvent, ConnectView, Start},
-    style,
+    palette::{self, PaletteCommand},
+    settings, style,
     update::Updater,
     workspace::{Workspace, WorkspaceEvent},
 };
+
+/// Each window's app view, so that the app-wide palette action reaches the
+/// window in front whatever has focus there, even nothing.
+#[derive(Default)]
+struct Windows(HashMap<WindowId, WeakEntity<RedcrabApp>>);
+
+impl Global for Windows {}
+
+/// Opens the command palette in the window in front.
+pub fn open_palette(cx: &mut App) {
+    let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
+        return;
+    };
+    let app = cx
+        .try_global::<Windows>()
+        .and_then(|windows| windows.0.get(&handle.window_id()))
+        .and_then(WeakEntity::upgrade);
+    let Some(app) = app else {
+        return;
+    };
+    handle
+        .update(cx, |_, window, cx| {
+            app.update(cx, |app, cx| app.show_palette(window, cx));
+        })
+        .ok();
+}
 
 /// What the title bar says about the connected server.
 struct Connection {
@@ -41,20 +74,189 @@ enum Screen {
 /// workspace, and owns the title bar.
 pub struct RedcrabApp {
     screen: Screen,
+    /// Held when nothing inside has focus (the connection screen before a
+    /// field is clicked), so that the window's shortcuts still work.
+    focus: FocusHandle,
     _subscription: Option<Subscription>,
     /// The title bar follows the updater, in a build that has one.
     _updates: Option<Subscription>,
+    _appearance: Subscription,
 }
 
 impl RedcrabApp {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (screen, subscription) = Self::connect_screen(start, window, cx);
+        let focus = cx.focus_handle();
+        if window.focused(cx).is_none() {
+            window.focus(&focus, cx);
+        }
+        let this = cx.weak_entity();
+        let windows = &mut cx.default_global::<Windows>().0;
+        windows.retain(|_, app| app.upgrade().is_some());
+        windows.insert(window.window_handle().window_id(), this);
         Self {
             screen,
+            focus,
             _subscription: Some(subscription),
             _updates: Updater::global(cx)
                 .map(|updater| cx.observe(&updater, |_, _, cx| cx.notify())),
+            _appearance: cx.observe_window_appearance(window, |_, window, cx| {
+                settings::system_appearance_changed(window, cx);
+            }),
         }
+    }
+
+    /// Opens the command palette with what this window can do now; not
+    /// over another dialog, the palette included.
+    fn show_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let commands = self.commands(window, cx);
+        palette::open(commands, window, cx);
+    }
+
+    /// The palette's commands: those of the screen shown, then the app's.
+    fn commands(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<PaletteCommand> {
+        let mut commands = Vec::new();
+        match &self.screen {
+            Screen::Workspace(workspace) => {
+                let target = workspace.read(cx).focus_handle();
+                let action = |group, label, action: Box<dyn gpui_kit::Action>, icon| {
+                    PaletteCommand::action(group, label, action, target.clone(), window).icon(icon)
+                };
+                commands.extend([
+                    action("Keys", "Refresh Keys", Box::new(Refresh), Lucide::RefreshCw)
+                        .keywords(&["reload", "scan", "rescan"]),
+                    action("Keys", "Search Keys", Box::new(FocusSearch), Lucide::Search)
+                        .keywords(&["filter", "find", "pattern"]),
+                    action("Keys", "New Key…", Box::new(NewKey), Lucide::Plus)
+                        .keywords(&["add", "create", "set"]),
+                    action("Keys", "Delete Key…", Box::new(DeleteKey), Lucide::Trash)
+                        .keywords(&["remove", "del", "unlink"]),
+                    action("Keys", "Save Value", Box::new(SaveValue), Lucide::Save),
+                    action(
+                        "Connection",
+                        "Toggle Console",
+                        Box::new(ToggleConsole),
+                        Lucide::SquareTerminal,
+                    )
+                    .keywords(&["cli", "command", "redis-cli"]),
+                ]);
+                let current = workspace.read(cx).client().config().db;
+                for db in workspace.read(cx).databases(cx) {
+                    if db.index == current {
+                        continue;
+                    }
+                    let keys = db
+                        .keys
+                        .map(|keys| format!(" ({} keys)", format::count(keys)))
+                        .unwrap_or_default();
+                    let target = workspace.downgrade();
+                    commands.push(
+                        PaletteCommand::new(
+                            "Connection",
+                            format!("Switch to db{}{keys}", db.index),
+                            move |window, cx| {
+                                target
+                                    .update(cx, |w, cx| w.ask_to_switch_db(db.index, window, cx))
+                                    .ok();
+                            },
+                        )
+                        .icon(Lucide::Database)
+                        .keywords(&["database", "select"]),
+                    );
+                }
+                let target = workspace.downgrade();
+                commands.push(
+                    PaletteCommand::new("Connection", "Disconnect", move |_, cx| {
+                        target.update(cx, |w, cx| w.disconnect(cx)).ok();
+                    })
+                    .icon(Lucide::Unplug)
+                    .keywords(&["close", "back"]),
+                );
+                // Another server opens beside this one.
+                for config in store::load_connections() {
+                    commands.push(
+                        PaletteCommand::new(
+                            "Connections",
+                            format!("Open {} in a New Window", config.name),
+                            move |_, cx| {
+                                crate::open_main_window(Start::Connect(config.clone()), cx)
+                            },
+                        )
+                        .icon(Lucide::Plug)
+                        .keywords(&["connect", "server"]),
+                    );
+                }
+            }
+            Screen::Connect(view) => {
+                for (ix, config) in view.read(cx).saved().iter().enumerate() {
+                    let view = view.downgrade();
+                    commands.push(
+                        PaletteCommand::new(
+                            "Connections",
+                            format!("Connect to {}", config.name),
+                            move |window, cx| {
+                                view.update(cx, |v, cx| v.connect_saved(ix, window, cx))
+                                    .ok();
+                            },
+                        )
+                        .icon(Lucide::Plug)
+                        .keywords(&["open", "server"]),
+                    );
+                }
+                let view = view.downgrade();
+                commands.push(
+                    PaletteCommand::new("Connections", "New Connection", move |window, cx| {
+                        view.update(cx, |v, cx| v.start_new(window, cx)).ok();
+                    })
+                    .icon(Lucide::Plus)
+                    .keywords(&["add", "server"]),
+                );
+            }
+        }
+
+        commands.push(
+            PaletteCommand::app_action("redcrab", "New Window", Box::new(NewWindow), window)
+                .icon(Lucide::AppWindow),
+        );
+        commands.push(
+            PaletteCommand::app_action("redcrab", "Settings…", Box::new(OpenSettings), window)
+                .icon(Lucide::Settings)
+                .keywords(&["preferences", "options", "config"]),
+        );
+        for (appearance, icon) in [
+            (Appearance::Light, Lucide::Sun),
+            (Appearance::Dark, Lucide::Moon),
+            (Appearance::System, Lucide::SunMoon),
+        ] {
+            commands.push(
+                PaletteCommand::new(
+                    "redcrab",
+                    format!("Theme: {}", appearance.label()),
+                    move |_, cx| settings::change(cx, |s| s.appearance = appearance),
+                )
+                .icon(icon)
+                .keywords(&["appearance", "color", "mode"]),
+            );
+        }
+        if let Some(updater) = Updater::global(cx) {
+            let handle = window.window_handle();
+            commands.push(
+                PaletteCommand::new("redcrab", "Check for Updates…", move |_, cx| {
+                    updater.update(cx, |updater, cx| updater.check(Some(handle), cx));
+                })
+                .icon(Lucide::CircleArrowDown)
+                .keywords(&["upgrade", "version", "release"]),
+            );
+        }
+        commands.push(
+            PaletteCommand::app_action("redcrab", "Quit", Box::new(Quit), window)
+                .icon(Lucide::Power)
+                .keywords(&["exit", "close"]),
+        );
+        commands
     }
 
     fn connect_screen(
@@ -100,93 +302,90 @@ impl RedcrabApp {
         let (screen, subscription) = Self::connect_screen(Start::Show(previous), window, cx);
         self.screen = screen;
         self._subscription = Some(subscription);
+        // What had focus went with the workspace.
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    /// The title bar's update controls: a button while a release is
-    /// offered or installing, which opens the update dialog here, and a
-    /// menu to look for one now or turn the daily check off.
-    fn update_controls(
+    /// The title bar's update button, while a release is offered or
+    /// installing: it opens the update dialog in this window.
+    fn update_button(
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
         let updater = Updater::global(cx)?;
+        let (label, loading) = updater.read(cx).button()?;
         let handle = window.window_handle();
-        let (button, busy, automatic) = {
-            let updater = updater.read(cx);
-            (updater.button(), updater.busy(), updater.automatic())
-        };
         Some(
-            h_flex()
-                .gap_1()
-                .when_some(button, |this, (label, loading)| {
-                    let updater = updater.clone();
-                    this.child(
-                        Button::new("update")
-                            .primary()
-                            .xsmall()
-                            .icon(gpui_kit::assets::IconName::CircleArrowDown)
-                            .label(label)
-                            .loading(loading)
-                            .on_click(move |_, _, cx| {
-                                updater.update(cx, |updater, cx| updater.offer(Some(handle), cx));
-                            }),
-                    )
-                })
-                .child(
-                    Button::new("app-menu")
-                        .ghost()
-                        .small()
-                        .icon(gpui_kit::assets::IconName::EllipsisVertical)
-                        .tooltip("More")
-                        .dropdown_menu(move |menu, _, _| {
-                            let check = updater.clone();
-                            let toggle = updater.clone();
-                            menu.item(
-                                PopupMenuItem::new("Check for Updates…")
-                                    .disabled(busy)
-                                    .on_click(move |_, _, cx| {
-                                        check.update(cx, |updater, cx| {
-                                            updater.check(Some(handle), cx)
-                                        });
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Check Automatically")
-                                    .checked(automatic)
-                                    .on_click(move |_, _, cx| {
-                                        toggle.update(cx, |updater, cx| {
-                                            updater.set_automatic(!automatic, cx)
-                                        });
-                                    }),
-                            )
-                            .separator()
-                            .item(
-                                PopupMenuItem::new(format!(
-                                    "redcrab {}",
-                                    env!("CARGO_PKG_VERSION")
-                                ))
-                                .disabled(true),
-                            )
-                        }),
-                ),
+            Button::new("update")
+                .primary()
+                .xsmall()
+                .icon(Lucide::CircleArrowDown)
+                .label(label)
+                .loading(loading)
+                .on_click(move |_, _, cx| {
+                    updater.update(cx, |updater, cx| updater.offer(Some(handle), cx));
+                }),
         )
     }
 
-    fn toggle_theme(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let mode = if cx.theme().is_dark() {
-            ThemeMode::Light
+    /// The ⋮ menu: the palette, the settings, updates and the version.
+    fn app_menu(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let handle = window.window_handle();
+        let updater = Updater::global(cx);
+        let busy = updater
+            .as_ref()
+            .is_some_and(|updater| updater.read(cx).busy());
+        Button::new("app-menu")
+            .ghost()
+            .small()
+            .icon(Lucide::EllipsisVertical)
+            .tooltip("More")
+            .dropdown_menu(move |menu, _, _| {
+                let updater = updater.clone();
+                menu.item(
+                    PopupMenuItem::new("Command Palette…")
+                        .icon(Icon::new(Lucide::Command))
+                        .on_click(|_, _, cx| open_palette(cx)),
+                )
+                .item(
+                    PopupMenuItem::new("Settings…")
+                        .icon(Icon::new(Lucide::Settings))
+                        .on_click(|_, window, cx| settings::open(window, cx)),
+                )
+                .when_some(updater, |menu, updater| {
+                    menu.separator().item(
+                        PopupMenuItem::new("Check for Updates…")
+                            .disabled(busy)
+                            .on_click(move |_, _, cx| {
+                                updater.update(cx, |updater, cx| updater.check(Some(handle), cx));
+                            }),
+                    )
+                })
+                .separator()
+                .item(
+                    PopupMenuItem::new(format!("redcrab {}", env!("CARGO_PKG_VERSION")))
+                        .disabled(true),
+                )
+            })
+    }
+
+    /// Light if dark now, dark if light, and remembered.
+    fn toggle_theme(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let appearance = if cx.theme().is_dark() {
+            Appearance::Light
         } else {
-            ThemeMode::Dark
+            Appearance::Dark
         };
-        Theme::change(mode, Some(window), cx);
+        settings::change(cx, |s| s.appearance = appearance);
     }
 }
 
 impl Render for RedcrabApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let updates = self.update_controls(window, cx);
+        let update = self.update_button(window, cx);
+        let menu = self.app_menu(window, cx);
         let theme = cx.theme();
         let connection = match &self.screen {
             Screen::Workspace(workspace) => {
@@ -211,6 +410,8 @@ impl Render for RedcrabApp {
         });
 
         v_flex()
+            .key_context("RedcrabApp")
+            .track_focus(&self.focus)
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -254,7 +455,7 @@ impl Render for RedcrabApp {
                             }),
                     )
                     .child(
-                        h_flex().pr_2().gap_1().children(updates).child(
+                        h_flex().pr_2().gap_1().children(update).child(menu).child(
                             Button::new("theme")
                                 .ghost()
                                 .small()

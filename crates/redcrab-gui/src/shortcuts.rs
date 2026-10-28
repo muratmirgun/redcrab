@@ -6,7 +6,10 @@
 
 use gpui_kit::KeyBinding;
 
-use crate::{DeleteKey, FocusSearch, NewKey, NewWindow, Quit, Refresh, SaveValue, ToggleConsole};
+use crate::{
+    DeleteKey, FocusSearch, NewKey, NewWindow, OpenPalette, OpenSettings, Quit, Refresh, SaveValue,
+    ToggleConsole,
+};
 
 /// A keystroke with the platform's primary modifier, as the `&'static
 /// str` GPUI's bindings take: `primary!("s")` is `cmd-s` on macOS and
@@ -42,6 +45,12 @@ pub fn bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new(primary!("q"), Quit, None),
         KeyBinding::new(primary!("n"), NewWindow, None),
+        // ⌘K in the app's own context, so that the console's ⌘K (clear,
+        // as in a terminal) wins inside it: GPUI ranks a binding without a
+        // context with the deepest. ⇧⌘P opens the palette everywhere.
+        KeyBinding::new(primary!("k"), OpenPalette, Some("RedcrabApp")),
+        KeyBinding::new(primary!("shift-p"), OpenPalette, None),
+        KeyBinding::new(primary!(","), OpenSettings, None),
         KeyBinding::new(primary!("r"), Refresh, WORKSPACE),
         KeyBinding::new(primary!("f"), FocusSearch, WORKSPACE),
         KeyBinding::new(primary!("backspace"), DeleteKey, WORKSPACE),
@@ -101,6 +110,19 @@ mod tests {
             &workspace
         )));
         assert!(is::<Quit>(bound(&format!("{primary}-q"), &[])));
+        // The palette and the settings open wherever focus is in the app.
+        for contexts in [
+            &["RedcrabApp"][..],
+            &["RedcrabApp", "Workspace", "KeyList"],
+            &["RedcrabApp", "ConnectView"],
+        ] {
+            assert!(is::<OpenPalette>(bound(&format!("{primary}-k"), contexts)));
+            assert!(is::<OpenPalette>(bound(
+                &format!("{primary}-shift-p"),
+                contexts
+            )));
+            assert!(is::<OpenSettings>(bound(&format!("{primary}-,"), contexts)));
+        }
         // Workspace keys only in the workspace.
         assert!(bound(&format!("{primary}-s"), &["ConnectView"]).is_none());
 

@@ -452,6 +452,11 @@ impl ConnectView {
     }
 
     fn new_connection(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_new(window, cx);
+    }
+
+    /// An empty form for a new connection, its name focused.
+    pub fn start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = None;
         self.fill(
             &ConnectionConfig {
@@ -464,6 +469,19 @@ impl ConnectView {
         self.inputs
             .name
             .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The saved connections, as the list shows them.
+    pub fn saved(&self) -> &[ConnectionConfig] {
+        &self.saved
+    }
+
+    /// Connects to the saved connection `ix`.
+    pub fn connect_saved(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix < self.saved.len() && !self.busy {
+            self.select(ix, window, cx);
+            self.connect(window, cx);
+        }
     }
 
     fn select(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {

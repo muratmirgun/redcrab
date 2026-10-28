@@ -602,6 +602,8 @@ mod tests {
             KeyBinding::new("shift-tab", InputOutdent, Some("Input")),
             KeyBinding::new("up", ListUp, Some("KeyList")),
         ];
+        // In the order `main` binds them.
+        bindings.extend(shortcuts::bindings());
         bindings.extend(key_bindings());
         let keymap = Keymap::new(bindings);
         let contexts: Vec<KeyContext> = contexts
@@ -620,7 +622,13 @@ mod tests {
 
     #[test]
     fn console_keys_beat_the_inputs_own() {
-        let console = ["Workspace", "Console", "ConsoleInput", "Input"];
+        let console = [
+            "RedcrabApp",
+            "Workspace",
+            "Console",
+            "ConsoleInput",
+            "Input",
+        ];
         assert!(is::<HistoryPrev>(winner("up", &console)));
         assert!(is::<HistoryNext>(winner("down", &console)));
         assert!(is::<CompleteNext>(winner("tab", &console)));
@@ -628,6 +636,15 @@ mod tests {
         assert!(is::<ClearConsole>(winner(
             shortcuts::primary!("k"),
             &console
+        )));
+        // The palette's other shortcut still reaches it from the console.
+        assert!(is::<crate::OpenPalette>(winner(
+            shortcuts::primary!("shift-p"),
+            &console
+        )));
+        assert!(is::<crate::OpenPalette>(winner(
+            shortcuts::primary!("k"),
+            &["RedcrabApp", "Workspace", "KeyList"]
         )));
     }
 

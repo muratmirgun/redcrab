@@ -15,6 +15,7 @@ pub mod format;
 pub mod formats;
 pub mod progress;
 mod runtime;
+pub mod settings;
 pub mod ssh;
 pub mod store;
 mod tree;

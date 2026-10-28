@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{Release, Version};
-use crate::store::config_dir;
+use crate::store::{config_dir, write_json};
 
 /// How often an automatic check runs: on start, then once a day.
 pub const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -66,13 +66,7 @@ impl Settings {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        write_json(path, self)
     }
 
     /// Whether an automatic check is due at `now`. A clock that went back

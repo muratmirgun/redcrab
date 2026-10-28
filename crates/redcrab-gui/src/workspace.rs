@@ -16,7 +16,7 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px,
 };
-use redcrab_core::{Client, Key, ServerInfo};
+use redcrab_core::{Client, DbInfo, Key, ServerInfo};
 
 use crate::{
     DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ToggleConsole,
@@ -125,6 +125,21 @@ impl Workspace {
         &self.client
     }
 
+    /// Where the workspace's own actions (refresh, new key, …) dispatch.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// The databases the key list's switcher offers (see
+    /// [`KeyBrowser::listed_databases`]).
+    pub fn databases(&self, cx: &gpui_kit::App) -> Vec<DbInfo> {
+        self.keys.read(cx).listed_databases()
+    }
+
+    pub fn disconnect(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Disconnect);
+    }
+
     /// Server stats for the status bar and database sizes for the key
     /// list's switcher, now and every few seconds after.
     fn poll(client: &Client, cx: &mut Context<Self>) -> Task<()> {
@@ -186,7 +201,7 @@ impl Workspace {
 
     /// Switches to database `db`, asking first if that would drop unsaved
     /// typing in the value panel.
-    fn ask_to_switch_db(&mut self, db: u32, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn ask_to_switch_db(&mut self, db: u32, window: &mut Window, cx: &mut Context<Self>) {
         if !self.value.read(cx).has_unsaved() {
             self.switch_db(db, window, cx);
             return;

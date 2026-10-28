@@ -91,6 +91,25 @@ fn begin_scan_starts_a_new_generation() {
 }
 
 #[test]
+fn scans_take_the_limits_set_and_keep_them_across_databases() {
+    let mut browser = KeyBrowser::new(b':', Some(10));
+    assert_eq!(browser.begin_scan("").options.count, 2000);
+    browser.set_scan_limits(Some(500), 100);
+    let request = browser.begin_scan("");
+    assert_eq!(
+        (request.options.limit, request.options.count),
+        (Some(500), 100)
+    );
+    // Another database of the same server: same limits.
+    browser.reset(b'/');
+    let request = browser.begin_scan("");
+    assert_eq!(
+        (request.options.limit, request.options.count),
+        (Some(500), 100)
+    );
+}
+
+#[test]
 fn shows_keys_as_they_stream_in() {
     let mut browser = KeyBrowser::new(b':', None);
     let request = browser.begin_scan("");

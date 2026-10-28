@@ -11,7 +11,11 @@
 //! else, so that test and smoke runs never touch the user's own; tests can
 //! also name a service directly with [`Credentials::new`].
 
-use std::{fs, path::PathBuf, sync::LazyLock};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use anyhow::{Context as _, Result, anyhow};
 
@@ -100,13 +104,21 @@ pub fn remember(connections: &mut Vec<ConnectionConfig>, config: &ConnectionConf
 /// Writes the connection list. Passwords are never written (see
 /// [`save_password`]).
 pub fn save_connections(connections: &[ConnectionConfig]) -> Result<()> {
-    let path = path().context("no config directory on this platform")?;
+    write_json(
+        &path().context("no config directory on this platform")?,
+        &connections,
+    )
+}
+
+/// Writes `value` as JSON to `path`, through a temporary file renamed over
+/// it, so that a crash never leaves half a file.
+pub(crate) fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(connections)?)?;
-    fs::rename(&tmp, &path)?;
+    fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 

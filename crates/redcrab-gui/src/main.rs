@@ -11,6 +11,8 @@ mod connect;
 mod console;
 mod edit;
 mod keys;
+mod palette;
+mod settings;
 mod shortcuts;
 mod style;
 mod update;
@@ -19,9 +21,7 @@ mod workspace;
 
 use connect::Start;
 use gpui_kit::{
-    App, AppContext as _, KeyBinding, WindowBounds, WindowOptions,
-    component::{Theme, TitleBar},
-    px, size,
+    App, AppContext as _, KeyBinding, WindowBounds, WindowOptions, component::TitleBar, px, size,
 };
 use redcrab_core::ConnectionConfig;
 
@@ -46,6 +46,8 @@ gpui_kit::actions!(
         CompleteNext,
         CompletePrev,
         ClearConsole,
+        OpenPalette,
+        OpenSettings,
     ]
 );
 
@@ -77,7 +79,8 @@ fn main() {
         .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
-            Theme::sync_system_appearance(None, cx);
+            // The saved theme and text size, before the first window draws.
+            settings::init(cx);
 
             // ⌘ on macOS, Ctrl elsewhere (see `shortcuts`).
             cx.bind_keys(shortcuts::bindings());
@@ -93,6 +96,10 @@ fn main() {
             cx.bind_keys(console::key_bindings());
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_action(|_: &NewWindow, cx| open_main_window(Start::Fresh, cx));
+            // Handled for the whole app, so that they work wherever focus
+            // is, even nowhere: in the window in front.
+            cx.on_action(|_: &OpenPalette, cx| app::open_palette(cx));
+            cx.on_action(|_: &OpenSettings, cx| settings::open_in_active_window(cx));
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -108,7 +115,7 @@ fn main() {
 }
 
 /// Every window starts at the connection screen and holds one connection.
-fn open_main_window(start: Start, cx: &mut App) {
+pub(crate) fn open_main_window(start: Start, cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
         window_min_size: Some(size(px(860.), px(520.))),
