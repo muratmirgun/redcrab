@@ -33,6 +33,11 @@ gpui_kit::actions!(
         StopCommand,
         SaveValue,
         NewKey,
+        HistoryPrev,
+        HistoryNext,
+        CompleteNext,
+        CompletePrev,
+        ClearConsole,
     ]
 );
 
@@ -79,6 +84,8 @@ fn main() {
                 // Reaches the console once its input has nothing to dismiss.
                 KeyBinding::new("escape", StopCommand, Some("Console")),
             ]);
+            // After `gpui_kit::init`, which binds the input's own keys.
+            cx.bind_keys(console::key_bindings());
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_action(|_: &NewWindow, cx| open_main_window(Start::Fresh, cx));
             cx.on_window_closed(|cx, _| {

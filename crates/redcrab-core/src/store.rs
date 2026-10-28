@@ -19,8 +19,9 @@ use crate::config::{ConnectionConfig, SshAuth, Topology};
 
 const SERVICE: &str = "redcrab";
 
-/// redcrab's own directory: `connections.json`, and the known_hosts file
-/// SSH tunnels record new hosts in.
+/// redcrab's own directory: `REDCRAB_CONFIG_DIR`, or the platform config
+/// directory. It holds `connections.json`, the known_hosts file SSH tunnels
+/// record new hosts in, and the console histories.
 pub fn config_dir() -> Option<PathBuf> {
     match std::env::var_os("REDCRAB_CONFIG_DIR") {
         Some(dir) => Some(PathBuf::from(dir)),

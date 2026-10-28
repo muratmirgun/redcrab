@@ -129,6 +129,22 @@ password under `<name>#sentinel`, the SSH password under `<name>#ssh` and the SS
 passphrase under `<name>#ssh-key`. New connection names cannot contain `#`; connections
 saved with one by older versions keep their name and password.
 
+The console keeps the last 1,000 commands of each connection in `history/` in the same
+directory, readable by its owner only. Commands that carry credentials are never written:
+`AUTH`, `HELLO ... AUTH`, `ACL SETUSER`, `CONFIG SET` of `requirepass`, `masterauth` and
+the like, `MIGRATE ... AUTH`, `MODULE LOAD` with arguments, scripts (`EVAL`,
+`SCRIPT LOAD`, `FUNCTION LOAD`) that mention any of these, and any line with an argument
+that looks like a password or a secret (which also keeps out harmless lines such as
+`HGET user:1 password_hint`).
+
+## Console
+
+<kbd>⌘J</kbd> opens a console with a connection of its own, so `SELECT` and `MULTI` stay
+in it. <kbd>↑</kbd> <kbd>↓</kbd> walk the history, <kbd>Tab</kbd> completes command
+names, subcommands and the options a command takes at the cursor (again to cycle), the
+rest of the command's syntax shows greyed out as you type, <kbd>Esc</kbd> closes the
+suggestions or stops a running command, and <kbd>⌘K</kbd> clears the log.
+
 ## Layout
 
 | Crate | What |
@@ -196,20 +212,20 @@ container start; if a test leaves one broken (say, after a failover), `up` recre
 it.
 
 The integration tests are in `crates/redcrab-core/tests/`, one file per area
-(`connect`, `scan`, `keys`, `values`, `read_only`, `console_session`,
-`browser_viewer`, `cluster`, `sentinel`, `ssh`, `unix_socket`, `credentials`), sharing
-`tests/common/mod.rs`: the endpoints, the `it!()` gate, and
-a key prefix per test (`it:{test}:{pid}:{n}:`) whose keys are deleted when the test
-ends, on every server and database it wrote to. Seeding and cleanup use plain
+(`connect`, `scan`, `keys`, `values`, `read_only`, `console_session`, `console_prompt`,
+`browser_viewer`, `keyspace`, `edit`, `edit_viewer`, `cluster`, `sentinel`, `ssh`,
+`unix_socket`, `credentials`), sharing `tests/common/mod.rs`: the endpoints, the `it!()`
+gate, and a key prefix per test (`it:{test}:{pid}:{n}:`) whose keys are deleted when the
+test ends, on every server and database it wrote to. Seeding and cleanup use plain
 redis-rs connections, not the code under test. `REDCRAB_IT=1 cargo test` works
 without `env` too; the helpers find `tests/docker/.generated/` on their own. Database
-5 on `standalone` is shared by the console tests (prefixed keys only); 12, 13 and 14
-each belong to one test, so two copies of the same suite running at once can collide
-there. The `sentinel` tests that use the service run one at a time, also across test
-processes (a lock file in the temporary directory), since one of them fails the master
-over (and back); the others play a sentinel of their own. `unix_socket` reaches
-`standalone`, `auth` and a cluster node through socket proxies of its own; the SSH
-tests keep their known_hosts files in temporary folders; `credentials` uses
-`REDCRAB_CREDENTIAL_SERVICE` (never `redcrab`; `redcrab-test` when unset) and deletes
-every entry it creates. A full run takes about 45 s, most of it in the Sentinel
+5 on `standalone` is shared by the console tests (prefixed keys only); 10, 11 and 15
+belong to the `keyspace` tests and 12, 13 and 14 each to one test, so two copies of the
+same suite running at once can collide there. The `sentinel` tests that use the service
+run one at a time, also across test processes (a lock file in the temporary directory),
+since one of them fails the master over (and back); the others play a sentinel of their
+own. `unix_socket` reaches `standalone`, `auth` and a cluster node through socket proxies
+of its own; the SSH tests keep their known_hosts files in temporary folders;
+`credentials` uses `REDCRAB_CREDENTIAL_SERVICE` (never `redcrab`; `redcrab-test` when
+unset) and deletes every entry it creates. A full run takes about 45 s, most of it in the Sentinel
 failovers and in one test that waits out a TLS handshake against a plain-TCP server.

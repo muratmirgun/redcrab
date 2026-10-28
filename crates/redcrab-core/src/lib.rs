@@ -9,6 +9,7 @@ pub mod bulk;
 mod client;
 pub mod commands;
 mod config;
+pub mod console;
 pub mod form;
 pub mod format;
 pub mod formats;

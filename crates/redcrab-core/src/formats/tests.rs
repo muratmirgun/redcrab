@@ -386,8 +386,15 @@ proptest! {
     #[test]
     fn detect_and_decode_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
         let format = detect(&bytes);
-        // What is detected decodes.
-        prop_assert!(decode(&bytes, format).is_ok(), "{format:?}");
+        // What is detected decodes, except MessagePack with a map key that
+        // is an array or a map: valid MessagePack that JSON cannot show,
+        // which the editor shows as stored with a notice saying why.
+        if let Err(err) = decode(&bytes, format) {
+            prop_assert!(
+                format == ValueFormat::MessagePack && err.to_string().contains("a map key that is"),
+                "{format:?}: {err:#}"
+            );
+        }
         for format in ValueFormat::ALL {
             let _ = decode(&bytes, format);
         }
