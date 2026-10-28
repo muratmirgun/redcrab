@@ -357,12 +357,12 @@ fn keys_of_any_bytes_from_list_to_value() {
     assert_eq!(key, binary);
     let loaded = block_on(viewer::load(&client, key)).unwrap();
     assert!(matches!(&loaded.data, ValueData::String(v) if v == b"\x01value"));
+    // Quoted the way redis-cli writes it, so it saves back the same bytes.
     let text = loaded.text(true).unwrap();
-    assert_eq!(text.text, "\\x01value");
-    assert!(
-        !text.editable,
-        "saving the escaped text would change the value"
-    );
+    assert_eq!(text.text, "\"\\x01value\"");
+    assert!(text.editable);
+    let edit = loaded.text_edit(true).unwrap();
+    assert_eq!(loaded.save_text(&edit, &text.text).unwrap(), None);
 
     let ix = row_of(&mut browser, TOP + 1, "claws");
     assert_eq!(browser.select(ix, false), Some(emoji));
@@ -467,8 +467,8 @@ fn the_value_view_of_every_type() {
     assert_eq!(json.meta.ty, KeyType::Json);
     let text = json.text(true).unwrap();
     assert!(
-        text.is_json && !text.editable,
-        "JSON documents are read-only"
+        text.is_json && text.editable,
+        "JSON documents are edited as JSON, saved with JSON.SET"
     );
     assert_eq!(json.row_count(), 0);
     assert_eq!(json.summary().as_deref(), Some("11 B"));

@@ -11,7 +11,9 @@ tokio = { workspace = true, features = ["net", "io-util"] }
 futures.workspace = true
 redis.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# Exact float parsing: MessagePack edited as JSON must write back the very
+# number it showed.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 tracing.workspace = true
 hashbrown = "0.16"
 foldhash = "0.2"
@@ -23,6 +25,9 @@ russh = { version = "0.65", default-features = false, features = ["ring", "rsa",
 # Hashed known_hosts entries: base64 salts and HMAC-SHA1.
 data-encoding = "2"
 ring = "0.17"
+# Value formats (formats.rs). Both are in the dependency tree already.
+base64 = "0.22"
+flate2 = "1"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

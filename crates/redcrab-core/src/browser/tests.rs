@@ -364,6 +364,38 @@ fn removes_deleted_keys() {
 }
 
 #[test]
+fn adds_created_keys_open_and_selected() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a", "user:1", "user:2"]);
+    browser.collapse_all();
+    assert_eq!(labels(&mut browser), ["+user/ (2)", "a"]);
+    // Into a closed folder: it opens, the key is selected.
+    assert_eq!(browser.add_key(b"user:new:1"), Some(2));
+    assert_eq!(
+        labels(&mut browser),
+        ["-user/ (3)", "  -new/ (1)", "    1 *", "  1", "  2", "a"]
+    );
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"user:new:1"[..]));
+    // One that is there already is just selected.
+    assert_eq!(browser.add_key(b"a"), Some(5));
+    assert_eq!(browser.key_count(), 4);
+    // A renamed key: the old one goes, the new one comes.
+    browser.remove_key(b"a");
+    assert_eq!(browser.add_key(b"b\xff"), Some(5));
+    assert_eq!(browser.row_view(5).unwrap().name, "b\\xff");
+
+    // Its type and TTL are fetched again once forgotten.
+    let len = browser.len();
+    let request = browser.take_meta_request(0..len).unwrap();
+    browser.apply_meta(request, Ok(vec![Some(meta(KeyType::String)); 4]));
+    assert!(browser.take_meta_request(0..len).is_none());
+    browser.forget_meta(b"user:1");
+    browser.forget_meta(b"unknown");
+    let request = browser.take_meta_request(0..len).unwrap();
+    assert_eq!(request.keys, [Key::from(&b"user:1"[..])]);
+}
+
+#[test]
 fn keeps_the_selection_across_a_rescan() {
     let mut browser = KeyBrowser::new(b':', None);
     scan(&mut browser, "", &["a", "b", "c"]);

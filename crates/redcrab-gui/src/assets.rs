@@ -17,7 +17,8 @@ gpui_kit::assets::icon_assets!(
         Braces,
         Lock,
         ShieldAlert,
-        Network
+        Network,
+        Pencil
     ]
 );
 

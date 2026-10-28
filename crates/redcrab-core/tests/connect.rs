@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use common::*;
 use redcrab_core::{
-    Client, ConnectionConfig, Cursor, Key, KeyType, RawValue, RowKind, TlsConfig, ValueData,
-    browser::KeyBrowser, viewer,
+    Client, ConnectionConfig, Cursor, EditError, Key, KeyType, NewValue, RawValue, RowKind,
+    TlsConfig, ValueData, browser::KeyBrowser, viewer,
 };
 
 /// A field of `INFO`, read on a plain connection.
@@ -25,10 +25,18 @@ fn info_field(con: &mut redis::Connection, name: &str) -> String {
         .to_string()
 }
 
-/// Writes and reads back a value through `client`, under `t`'s prefix.
+/// Writes and reads back a value through `client`, under `t`'s prefix:
+/// creates the key the first time, replaces its value after.
 fn round_trip(t: &It, client: &Client, name: &str, value: &[u8]) {
     let key = t.bkey(name);
-    block_on(client.set_string(key.clone(), value.to_vec())).unwrap();
+    let created = block_on(client.create_key(key.clone(), NewValue::String(value.to_vec()), None));
+    match created {
+        Ok(()) => {}
+        Err(err) if err.downcast_ref() == Some(&EditError::KeyExists) => {
+            block_on(client.set_string(key.clone(), value.to_vec())).unwrap();
+        }
+        Err(err) => panic!("{err:#}"),
+    }
     let page = block_on(client.load(key, KeyType::String, Cursor::Start, 1)).unwrap();
     let ValueData::String(bytes) = page.data else {
         panic!("not a string: {:?}", page.data);
@@ -161,6 +169,7 @@ fn acl_user_within_its_permissions() {
     assert!(info.summary()[0].ends_with(" keys"));
 
     let key = app.bkey("k");
+    block_on(client.create_key(key.clone(), NewValue::String(b"mine".to_vec()), None)).unwrap();
     block_on(client.set_string(key.clone(), b"mine".to_vec())).unwrap();
     assert!(block_on(client.server_info()).unwrap().db_size >= Some(1));
     let meta = block_on(client.key_meta(vec![key.clone()])).unwrap();
@@ -184,7 +193,8 @@ fn acl_user_within_its_permissions() {
     );
 
     // Keys outside `app:*` are refused by the server.
-    let err = block_on(client.set_string(t.bkey("outside"), b"x".to_vec())).unwrap_err();
+    let err = block_on(client.create_key(t.bkey("outside"), NewValue::String(b"x".to_vec()), None))
+        .unwrap_err();
     assert!(
         format!("{err:#}").to_lowercase().contains("noperm"),
         "{err:#}"

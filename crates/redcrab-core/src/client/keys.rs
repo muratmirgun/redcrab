@@ -3,13 +3,14 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use futures::{SinkExt as _, StreamExt as _, channel::mpsc};
 use redis::{RedisError, ServerError, Value, cmd};
 
 use super::{
-    Client, Key, ScanEvent, ScanOptions,
+    Client, EditError, Key, ScanEvent, ScanOptions,
     cluster::{key_slot, unowned_error},
+    edit::check_ttl,
 };
 use crate::{
     runtime::{runtime, spawn},
@@ -276,7 +277,10 @@ impl Client {
         })
     }
 
-    /// Sets the TTL in seconds, or removes it with `None`.
+    /// Sets the TTL in seconds, or removes it with `None`. Returns whether
+    /// anything changed (`false` when persisting a key without a TTL).
+    /// Fails with [`EditError::KeyMissing`] for a key that is gone, and
+    /// refuses a TTL of 0, which would delete the key.
     pub fn set_ttl(
         &self,
         key: Key,
@@ -286,23 +290,37 @@ impl Client {
         let mut con = self.conn.clone();
         spawn(async move {
             writable?;
-            let changed: bool = match seconds {
-                Some(s) => {
-                    cmd("EXPIRE")
+            // Plain commands rather than a script, so ACL users without
+            // @scripting can change TTLs too. Neither creates a key.
+            match seconds {
+                Some(seconds) => {
+                    check_ttl(seconds)?;
+                    // Without options EXPIRE answers 0 only for a missing key.
+                    let set: bool = cmd("EXPIRE")
                         .arg(&*key)
-                        .arg(s)
+                        .arg(seconds)
                         .query_async(&mut con)
-                        .await?
+                        .await?;
+                    ensure!(set, EditError::KeyMissing);
+                    Ok(true)
                 }
-                None => cmd("PERSIST").arg(&*key).query_async(&mut con).await?,
-            };
-            Ok(changed)
+                None => {
+                    // 0 for a missing key, and for a key without a TTL.
+                    let removed: bool = cmd("PERSIST").arg(&*key).query_async(&mut con).await?;
+                    if !removed {
+                        let exists: bool = cmd("EXISTS").arg(&*key).query_async(&mut con).await?;
+                        ensure!(exists, EditError::KeyMissing);
+                    }
+                    Ok(removed)
+                }
+            }
         })
     }
 
-    /// Renames without overwriting an existing key. On a cluster both names
-    /// must hash to the same slot (a hash tag such as `{user:42}` in both
-    /// does that), since a key cannot move between nodes by renaming.
+    /// Renames without overwriting an existing key ([`EditError::KeyExists`]);
+    /// a key that is gone fails with [`EditError::KeyMissing`]. On a cluster
+    /// both names must hash to the same slot (a hash tag such as `{user:42}`
+    /// in both does that), since a key cannot move between nodes by renaming.
     pub fn rename(&self, from: Key, to: Key) -> impl Future<Output = Result<()>> + Send + 'static {
         let writable = self.ensure_writable();
         let mut con = self.conn.clone();
@@ -318,14 +336,18 @@ impl Client {
                 .query_async(&mut con)
                 .await
             {
+                Ok(renamed) => renamed,
+                Err(err) if err.detail().is_some_and(|d| d.contains("no such key")) => {
+                    return Err(EditError::KeyMissing.into());
+                }
                 Err(err) if err.code() == Some("CROSSSLOT") => bail!("{}", cross_slot(&from, &to)),
-                renamed => renamed?,
+                Err(err) => return Err(err.into()),
             };
             if !renamed {
-                bail!(
+                return Err(anyhow::Error::new(EditError::KeyExists).context(format!(
                     "a key named {} already exists",
                     String::from_utf8_lossy(&to)
-                );
+                )));
             }
             Ok(())
         })

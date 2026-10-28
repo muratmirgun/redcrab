@@ -153,7 +153,7 @@ fn connects_to_the_master_sentinel_names() {
     assert!(client.topology().supports_databases());
 
     let key = t.bkey("hello");
-    block_on(client.set_string(key.clone(), b"world \xff".to_vec())).unwrap();
+    put_string(&client, &key, b"world \xff");
     let mut seed = t.seed_sentinel();
     let stored: Vec<u8> = redis::cmd("GET").arg(&*key).query(&mut seed).unwrap();
     assert_eq!(stored, b"world \xff");
@@ -190,7 +190,7 @@ fn the_configured_database_is_used() {
         ..sentinel()
     });
     let key = t.bkey("in-db-7");
-    block_on(client.set_string(key.clone(), b"x".to_vec())).unwrap();
+    put_string(&client, &key, b"x");
     let mut db7 = node(sentinel_master());
     redis::cmd("SELECT").arg(7).query::<()>(&mut db7).unwrap();
     let exists: bool = redis::cmd("EXISTS").arg(&*key).query(&mut db7).unwrap();
@@ -284,7 +284,7 @@ fn the_same_client_follows_a_failover() {
     let client = t.connect(sentinel());
     let console = client.console();
     let first = t.bkey("before-failover");
-    block_on(client.set_string(first.clone(), b"1".to_vec())).unwrap();
+    put_string(&client, &first, b"1");
     assert_eq!(get(&client, &first).as_deref(), Some(&b"1"[..]));
     assert_eq!(
         ok(&console, &format!("SET {} c1", t.key("console"))),
@@ -298,7 +298,7 @@ fn the_same_client_follows_a_failover() {
 
     // The same client, with no reconnect by the caller.
     let second = t.bkey("after-failover");
-    block_on(client.set_string(second.clone(), b"2".to_vec())).unwrap();
+    put_string(&client, &second, b"2");
     assert_eq!(get(&client, &second).as_deref(), Some(&b"2"[..]));
     assert_eq!(
         get(&client, &first).as_deref(),
@@ -338,7 +338,7 @@ fn the_same_client_follows_a_failover() {
     if after != 6410 {
         fail_over();
         wait_for_master(6410);
-        block_on(client.set_string(second.clone(), b"3".to_vec())).unwrap();
+        put_string(&client, &second, b"3");
         assert_eq!(get(&client, &second).as_deref(), Some(&b"3"[..]));
     }
 }

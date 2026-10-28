@@ -1,17 +1,30 @@
 //! The value view every front end shows: a key's value loaded page by page,
-//! the table a collection is shown as, and the text of a string or JSON
-//! value with the rules for editing it.
+//! the table a collection is shown as, the text of a value in a chosen
+//! format with the rules for editing it, and the edits themselves (see
+//! [`Mutation`]).
 //!
 //! The model holds data only; a front end awaits the futures it hands out
-//! ([`load`], [`Loaded::load_more`]) on its own executor.
+//! ([`load`], [`Loaded::load_more`], [`Mutation::send`]) on its own
+//! executor.
+
+mod edit;
+mod text;
 
 use std::{
-    borrow::Cow,
+    collections::BTreeSet,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context as _, Result};
 
+pub use self::{
+    edit::{
+        AddRow, Applied, Mutation, NameField, NewKeyType, Outcome, RowEdit, change_ttl,
+        format_score, new_key, parse_score, parse_stream_fields, parse_ttl, rename_key, set_ttl,
+        ttl_input, ttl_prefill,
+    },
+    text::{TextEdit, TextValue},
+};
 use crate::{
     client::{Client, Key},
     format,
@@ -222,15 +235,41 @@ impl Loaded {
             .map(|bytes| TextValue::new(&bytes, false))
     }
 
-    /// The text of a string or JSON value. Only a whole string value on a
-    /// `writable` connection can be edited; JSON documents are read-only
-    /// (saving them as a string would change the key's type).
+    /// The text of a string or JSON value, in the format it looks to be in.
+    /// See [`Self::text_edit`].
     pub fn text(&self, writable: bool) -> Option<TextValue> {
+        self.text_edit(writable).map(|edit| edit.view().clone())
+    }
+
+    /// Editing a string or JSON value. Only a whole value (not the preview
+    /// of a big string) on a `writable` connection can be edited; a JSON
+    /// document of the JSON module stays JSON (saving it as a string would
+    /// change the key's type).
+    pub fn text_edit(&self, writable: bool) -> Option<TextEdit> {
         match &self.data {
-            ValueData::String(bytes) => Some(TextValue::new(bytes, writable && !self.is_preview())),
-            ValueData::Json(json) => Some(TextValue::new(json.as_bytes(), false)),
+            ValueData::String(bytes) => {
+                Some(TextEdit::new(bytes.clone(), writable && !self.is_preview()))
+            }
+            ValueData::Json(json) => Some(TextEdit::json_document(json.clone(), writable)),
             _ => None,
         }
+    }
+
+    /// The change that saves `edited` (the editor's text) for a string or
+    /// JSON value, or `None` if it would change nothing. Fails with the
+    /// reason if the text does not fit its format.
+    pub fn save_text(&self, edit: &TextEdit, edited: &str) -> Result<Option<Mutation>> {
+        let Some(bytes) = edit.to_save(edited)? else {
+            return Ok(None);
+        };
+        let key = self.key.clone();
+        Ok(Some(match self.data {
+            ValueData::Json(_) => Mutation::SetJson {
+                key,
+                json: String::from_utf8(bytes).context("JSON must be UTF-8 text")?,
+            },
+            _ => Mutation::SetString { key, value: bytes },
+        }))
     }
 
     /// Whether only the beginning of a big string was loaded.
@@ -273,6 +312,48 @@ impl Loaded {
     }
 }
 
+/// What a click on a row of a collection does; see [`click_row`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowClick {
+    /// Open the row in the detail pane, in place of the one open.
+    Open(usize),
+    /// Leave the detail pane as it is.
+    Keep,
+    /// The open row has unsaved edits: ask before opening this one (and
+    /// then call [`click_row`] again with `dirty` false).
+    AskFirst(usize),
+}
+
+/// A click on row `ix`: a plain one picks only that row (for deleting) and
+/// opens it in the detail pane; with ⌘ (`add`) it adds the row to the rows
+/// picked, or takes it out, and opens nothing. The row `open` in the pane,
+/// if it has unsaved edits (`dirty`), is never replaced without asking,
+/// and a click on it keeps what was typed.
+pub fn click_row(
+    picked: &mut BTreeSet<usize>,
+    open: Option<usize>,
+    dirty: bool,
+    ix: usize,
+    add: bool,
+) -> RowClick {
+    if add {
+        if !picked.remove(&ix) {
+            picked.insert(ix);
+        }
+        return RowClick::Keep;
+    }
+    if open != Some(ix) && dirty {
+        return RowClick::AskFirst(ix);
+    }
+    picked.clear();
+    picked.insert(ix);
+    if open == Some(ix) {
+        RowClick::Keep
+    } else {
+        RowClick::Open(ix)
+    }
+}
+
 fn cell(bytes: &[u8]) -> String {
     let end = bytes.len().min(CELL_PREVIEW);
     format::bytes_inline(&bytes[..end]).into_owned()
@@ -285,263 +366,8 @@ fn json_string(out: &mut String, s: &str) {
     }
 }
 
-/// A string or JSON value as text.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TextValue {
-    /// What to show: JSON indented, anything else escaped like `redis-cli`.
-    pub text: String,
-    /// Valid JSON (an object or array), worth highlighting as such.
-    pub is_json: bool,
-    /// The JSON was indented for display; an edit is saved back on one
-    /// line, spaced the way it was stored.
-    pub reformatted_json: bool,
-    /// Editing is allowed and `text` is the value's bytes, or (for indented
-    /// JSON) the same tokens laid out differently, so saving cannot change
-    /// anything the user did not touch.
-    pub editable: bool,
-    /// How the stored JSON was spaced, when it was indented for display.
-    spacing: Option<Spacing>,
-}
-
-impl TextValue {
-    /// `editable` is whether the caller allows editing (a whole value on a
-    /// writable connection); the result is editable only if the value is
-    /// also plain text that shows without escapes.
-    ///
-    /// JSON on one line, compact or with a space after each `,` and `:` (as
-    /// Python writes it), is indented for display, since saving restores
-    /// exactly that spacing. JSON laid out any other way (indented already,
-    /// say) is shown as stored, so that saving keeps its layout.
-    pub fn new(bytes: &[u8], editable: bool) -> Self {
-        let lossless = matches!(format::bytes(bytes), Cow::Borrowed(_));
-        let editable = editable && lossless;
-        let Some(json) = std::str::from_utf8(bytes)
-            .ok()
-            .filter(|s| is_json_document(s))
-        else {
-            return Self {
-                text: format::bytes(bytes).into_owned(),
-                is_json: false,
-                reformatted_json: false,
-                editable,
-                spacing: None,
-            };
-        };
-        let spacing = one_line_spacing(json);
-        // Text that cannot be shown as stored (a `\r` in it) is indented
-        // too; it is not editable anyway.
-        if spacing.is_none() && lossless {
-            return Self {
-                text: json.to_string(),
-                is_json: true,
-                reformatted_json: false,
-                editable,
-                spacing: None,
-            };
-        }
-        let pretty = pretty_json(json);
-        Self {
-            reformatted_json: pretty != json,
-            is_json: true,
-            text: pretty,
-            editable,
-            spacing,
-        }
-    }
-
-    /// The bytes to write for the edited text: JSON that was indented for
-    /// display goes back on one line, spaced as it was stored, if it still
-    /// parses; anything else is written as typed.
-    pub fn bytes_to_save(&self, edited: &str) -> Vec<u8> {
-        match self.spacing {
-            Some(spacing) if self.reformatted_json && is_json_document(edited) => {
-                spaced_json(&compact_json(edited), spacing).into_bytes()
-            }
-            _ => edited.as_bytes().to_vec(),
-        }
-    }
-}
-
-/// How JSON on one line is spaced: whether a space follows each `,` and
-/// each `:` between tokens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Spacing {
-    comma: bool,
-    colon: bool,
-}
-
-/// The spacings recognised, the most common first: compact (most
-/// serializers) and Python's `json.dumps` default. A document without
-/// colons or commas fits several, and gets the first.
-const SPACINGS: [Spacing; 4] = [
-    Spacing {
-        comma: false,
-        colon: false,
-    },
-    Spacing {
-        comma: true,
-        colon: true,
-    },
-    Spacing {
-        comma: true,
-        colon: false,
-    },
-    Spacing {
-        comma: false,
-        colon: true,
-    },
-];
-
-/// The spacing of `json` if it is all on one line, spaced consistently.
-fn one_line_spacing(json: &str) -> Option<Spacing> {
-    let compact = compact_json(json);
-    SPACINGS
-        .into_iter()
-        .find(|&spacing| spaced_json(&compact, spacing) == json)
-}
-
-/// Compact JSON with a space after each `,` and/or `:` between tokens.
-fn spaced_json(compact: &str, spacing: Spacing) -> String {
-    let bytes = compact.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 4);
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                let end = string_end(bytes, i);
-                out.extend_from_slice(&bytes[i..end]);
-                i = end;
-                continue;
-            }
-            b',' if spacing.comma => out.extend_from_slice(b", "),
-            b':' if spacing.colon => out.extend_from_slice(b": "),
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    into_string(out)
-}
-
-/// An object or array that parses as JSON.
-fn is_json_document(s: &str) -> bool {
-    s.trim_start().starts_with(['{', '['])
-        && serde_json::from_str::<serde::de::IgnoredAny>(s).is_ok()
-}
-
-/// Indents valid JSON like `serde_json`'s pretty printer, but by moving
-/// whitespace only: key order, number spelling and string escapes stay
-/// exactly as stored, so saving it back on one line changes nothing else.
-fn pretty_json(json: &str) -> String {
-    let bytes = json.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 2);
-    let mut depth = 0usize;
-    let newline = |out: &mut Vec<u8>, depth: usize| {
-        out.push(b'\n');
-        out.resize(out.len() + depth * 2, b' ');
-    };
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
-            b'"' => {
-                let end = string_end(bytes, i);
-                out.extend_from_slice(&bytes[i..end]);
-                i = end;
-            }
-            open @ (b'{' | b'[') => {
-                let close = if open == b'{' { b'}' } else { b']' };
-                let next = skip_whitespace(bytes, i + 1);
-                if bytes.get(next) == Some(&close) {
-                    out.extend_from_slice(&[open, close]);
-                    i = next + 1;
-                } else {
-                    out.push(open);
-                    depth += 1;
-                    newline(&mut out, depth);
-                    i += 1;
-                }
-            }
-            close @ (b'}' | b']') => {
-                depth = depth.saturating_sub(1);
-                newline(&mut out, depth);
-                out.push(close);
-                i += 1;
-            }
-            b',' => {
-                out.push(b',');
-                newline(&mut out, depth);
-                i += 1;
-            }
-            b':' => {
-                out.extend_from_slice(b": ");
-                i += 1;
-            }
-            _ => {
-                let start = i;
-                while i < bytes.len() && !is_structural(bytes[i]) {
-                    i += 1;
-                }
-                out.extend_from_slice(&bytes[start..i]);
-            }
-        }
-    }
-    into_string(out)
-}
-
-/// Drops the whitespace between JSON tokens.
-fn compact_json(json: &str) -> String {
-    let bytes = json.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
-            b'"' => {
-                let end = string_end(bytes, i);
-                out.extend_from_slice(&bytes[i..end]);
-                i = end;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    into_string(out)
-}
-
-/// The index just past the string that starts with the quote at `start`.
-fn string_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            b'"' => return i + 1,
-            _ => i += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_whitespace(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
-        i += 1;
-    }
-    i
-}
-
-fn is_structural(b: u8) -> bool {
-    matches!(
-        b,
-        b' ' | b'\t' | b'\n' | b'\r' | b',' | b':' | b'{' | b'}' | b'[' | b']' | b'"'
-    )
-}
-
-/// Only ASCII is ever added or removed, so valid UTF-8 stays valid; the
-/// fallback is for input that was not valid to begin with.
-fn into_string(bytes: Vec<u8>) -> String {
-    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
+#[cfg(test)]
+mod edit_tests;
 
 #[cfg(test)]
 mod tests;

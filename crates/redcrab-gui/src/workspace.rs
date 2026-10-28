@@ -19,7 +19,7 @@ use gpui_kit::{
 use redcrab_core::{Client, ServerInfo};
 
 use crate::{
-    DeleteKey, FocusSearch, Refresh, ToggleConsole,
+    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
     value::{ValueEvent, ValuePanel},
@@ -82,6 +82,15 @@ impl Workspace {
             cx.subscribe_in(&value, window, |this, _, event, _, cx| match event {
                 ValueEvent::Deleted(key) => {
                     this.keys.update(cx, |keys, cx| keys.remove_key(key, cx));
+                }
+                ValueEvent::Renamed { from, to } => {
+                    this.keys.update(cx, |keys, cx| {
+                        keys.remove_key(from, cx);
+                        keys.add_key(to, cx);
+                    });
+                }
+                ValueEvent::Changed(key) => {
+                    this.keys.update(cx, |keys, cx| keys.forget_meta(key, cx));
                 }
             }),
         ];
@@ -194,6 +203,14 @@ impl Workspace {
             .update(cx, |value, cx| value.request_delete(window, cx));
     }
 
+    fn save_value(&mut self, _: &SaveValue, window: &mut Window, cx: &mut Context<Self>) {
+        self.value.update(cx, |value, cx| value.save(window, cx));
+    }
+
+    fn new_key(&mut self, _: &NewKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.keys.update(cx, |keys, cx| keys.new_key(window, cx));
+    }
+
     fn toggle_console(&mut self, _: &ToggleConsole, window: &mut Window, cx: &mut Context<Self>) {
         self.show_console = !self.show_console;
         if self.show_console {
@@ -295,6 +312,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::delete_key))
             .on_action(cx.listener(Self::toggle_console))
+            .on_action(cx.listener(Self::save_value))
+            .on_action(cx.listener(Self::new_key))
             .child(
                 div().flex_1().min_h_0().child(
                     h_resizable("workspace")

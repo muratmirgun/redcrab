@@ -173,24 +173,4 @@ impl Client {
             Ok(page)
         })
     }
-
-    /// Replaces a string value, keeping its TTL.
-    pub fn set_string(
-        &self,
-        key: Key,
-        value: Vec<u8>,
-    ) -> impl Future<Output = Result<()>> + Send + 'static {
-        let writable = self.ensure_writable();
-        let mut con = self.conn.clone();
-        spawn(async move {
-            writable?;
-            cmd("SET")
-                .arg(&*key)
-                .arg(value)
-                .arg("KEEPTTL")
-                .query_async::<()>(&mut con)
-                .await?;
-            Ok(())
-        })
-    }
 }

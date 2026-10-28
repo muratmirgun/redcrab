@@ -26,6 +26,21 @@ keyspaces with millions of keys while using a fraction of the memory.
   exactly how many keys went. Folder names are matched literally, glob characters and
   all.
 
+## Editing
+
+Values of every type can be edited: strings and JSON documents as text, collection rows
+in a detail pane, rows added and deleted, keys created, renamed and given a TTL. Values
+show as text, JSON, a hex dump, or decoded from Base64, MessagePack or gzip, and are
+saved back in the same format. Bytes that are not text are edited the way `redis-cli`
+writes them (`"\xff\x00"`).
+
+Every change is one step on one key (mostly a Lua script), so it is atomic and checks what
+it relies on: a key deleted or replaced since it was loaded is never recreated or
+overwritten, a list element is only changed while it still holds what was loaded, a new key
+never replaces an existing one. A read-only connection refuses every change in core, not
+just in the UI. Users whose ACL denies scripts (`-@scripting`) can still save strings,
+change TTLs and rename keys; editing collections and creating keys needs `EVAL`.
+
 ## TLS
 
 Turn on **Use TLS** in the connection form, or connect with a `rediss://` URL. By default

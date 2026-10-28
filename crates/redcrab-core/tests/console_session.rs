@@ -102,6 +102,12 @@ fn transactions_in_the_console_do_not_hold_up_the_app() {
     let Some(t) = it!() else { return };
     let key = t.key("k");
     let mut con = t.seed0();
+    // The app edits values that exist.
+    redis::cmd("SET")
+        .arg(&key)
+        .arg("before")
+        .query::<()>(&mut con)
+        .unwrap();
     let client = t.connect(standalone());
     let console = client.console();
 

@@ -27,8 +27,8 @@ use anyhow::{Context as _, Result};
 pub use futures::executor::block_on;
 use futures::{Stream, StreamExt as _};
 use redcrab_core::{
-    Client, ConnectionConfig, ConsoleSession, Key, KeyTree, RawValue, ReadOnlyError, ScanEvent,
-    ScanOptions, TlsConfig, Topology, browser,
+    Client, ConnectionConfig, ConsoleSession, EditError, Key, KeyTree, NewValue, RawValue,
+    ReadOnlyError, ScanEvent, ScanOptions, TlsConfig, Topology, browser,
 };
 use redis::{ConnectionAddr, IntoConnectionInfo as _, RedisConnectionInfo};
 
@@ -514,6 +514,22 @@ fn raw_client(server: Server, db: u32) -> Result<redis::Client> {
         root_cert: read(&tls.ca_file)?,
     };
     Ok(redis::Client::build_with_tls(info, certificates)?)
+}
+
+/// Writes a string through `client`, creating the key when it is new:
+/// `set_string` only changes a string that exists, `create_key` only makes
+/// a key that does not.
+pub fn put_string(client: &Client, key: &Key, value: impl Into<Vec<u8>>) {
+    let value = value.into();
+    match block_on(client.create_key(key.clone(), NewValue::String(value.clone()), None)) {
+        Ok(()) => {}
+        Err(err) if err.downcast_ref::<EditError>() == Some(&EditError::KeyExists) => {
+            block_on(client.set_string(key.clone(), value)).unwrap_or_else(|err| {
+                panic!("could not write {}: {err:#}", String::from_utf8_lossy(key))
+            });
+        }
+        Err(err) => panic!("could not create {}: {err:#}", String::from_utf8_lossy(key)),
+    }
 }
 
 /// `Client::connect`'s error as `{:#}` shows it (the whole chain).

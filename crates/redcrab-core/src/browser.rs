@@ -691,6 +691,38 @@ impl KeyBrowser {
         self.recount();
         self.rows_dirty = true;
     }
+
+    /// Adds a key the app just created (or renamed something to) without a
+    /// rescan, opens the folders it is in and selects it. Returns its row,
+    /// to scroll to. It shows even if it does not match the filter: it is
+    /// what the user just made.
+    pub fn add_key(&mut self, key: &[u8]) -> Option<usize> {
+        let node = {
+            let mut tree = self.tree();
+            tree.insert(key);
+            let node = tree.find(key).filter(|&node| tree.is_key(node))?;
+            let mut folder = tree.parent(node);
+            while let Some(open) = folder {
+                tree.set_expanded(open, true);
+                folder = tree.parent(open);
+            }
+            node
+        };
+        self.meta.remove(&node);
+        self.selected = Some((node, RowKind::Key));
+        self.reselect = None;
+        self.rows_dirty = true;
+        self.selected_index()
+    }
+
+    /// Forgets a key's type and TTL, so the next frame that shows it asks
+    /// again (after its TTL or type changed).
+    pub fn forget_meta(&mut self, key: &[u8]) {
+        let node = self.tree().find(key);
+        if let Some(node) = node {
+            self.meta.remove(&node);
+        }
+    }
 }
 
 fn clamp(range: Range<usize>, len: usize) -> Range<usize> {

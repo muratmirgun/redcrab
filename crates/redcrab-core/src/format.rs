@@ -7,10 +7,18 @@ use redis::Value;
 /// Shows bytes as text, escaping anything that is not printable UTF-8 the way
 /// `redis-cli` does (`\x00`, `\n`, ...).
 pub fn bytes(b: &[u8]) -> Cow<'_, str> {
-    match std::str::from_utf8(b) {
-        Ok(s) if !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t') => Cow::Borrowed(s),
-        _ => Cow::Owned(escape(b)),
+    match as_text(b) {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(escape(b)),
     }
+}
+
+/// The bytes as text if [`bytes`] shows them as they are: printable UTF-8,
+/// line breaks and tabs allowed. Costs no copy when they are not.
+pub fn as_text(b: &[u8]) -> Option<&str> {
+    std::str::from_utf8(b)
+        .ok()
+        .filter(|s| !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t'))
 }
 
 /// Like [`bytes`], but also escapes newlines and tabs so the result fits on

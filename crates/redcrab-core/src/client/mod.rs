@@ -1,11 +1,12 @@
 //! The connection to one server and every request the app makes over it.
 //!
 //! Requests are split by topic: `keys` (scan and key-level operations),
-//! `values` (reading and writing values), `admin` (server-level requests) and
-//! `console` (the console's own session). They all talk to Redis through
-//! [`Conn`], which hides the topology: one server (`Single`, also over a
-//! Unix socket or an SSH tunnel), a `cluster`, or a master found through
-//! `sentinel`.
+//! `values` (reading values), `edit` (changing values, creating keys),
+//! `admin` (server-level requests), `bulk` (walks over every matching key),
+//! `databases` and `console` (the console's own session). They all talk to
+//! Redis through [`Conn`], which hides the topology: one server (`Single`,
+//! also over a Unix socket or an SSH tunnel), a `cluster`, or a master found
+//! through `sentinel`.
 
 mod admin;
 mod bulk;
@@ -14,6 +15,7 @@ mod conn;
 mod connector;
 mod console;
 mod databases;
+mod edit;
 mod keys;
 mod sentinel;
 mod values;
@@ -37,6 +39,8 @@ pub use self::cluster::key_slot;
 pub(crate) use self::conn::Conn;
 pub use self::console::ConsoleSession;
 pub use self::databases::DbInfo;
+pub(crate) use self::edit::score_arg;
+pub use self::edit::{EditError, ListEnd, MAX_TTL_SECS, NewValue, Removed, check_stream_id};
 use self::{cluster::Cluster, connector::Connector, sentinel::Sentinel};
 use crate::{
     commands::{CommandClass, READ_ONLY_SCRIPTS},

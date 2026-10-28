@@ -18,8 +18,8 @@ use std::collections::HashMap;
 
 use common::*;
 use redcrab_core::{
-    ConnectionConfig, ConsoleSession, KeyType, RawValue, ReadOnlyError, RowKind, ScanOptions,
-    ValueData,
+    Client, ConnectionConfig, ConsoleSession, Key, KeyType, ListEnd, NewValue, RawValue,
+    ReadOnlyError, RowKind, ScanOptions, ValueData,
     browser::{KeyBrowser, ScanStatus},
     viewer,
 };
@@ -135,6 +135,35 @@ fn refused(t: &It, console: &ConsoleSession, line: &str, name: &str) -> ReadOnly
     read_only
 }
 
+/// Every change to a value or a new key, on the keys `seed` made (`k`
+/// names them), each with the overwrite flags set where there are any.
+fn every_change(client: &Client, k: &dyn Fn(&str) -> Key) -> Vec<anyhow::Result<()>> {
+    let v = || b"v".to_vec();
+    vec![
+        block_on(client.set_string(k("s"), b"after".to_vec())),
+        block_on(client.set_json(k("j"), "[2]".into())),
+        block_on(client.hash_set(k("h"), v(), v(), true)).map(drop),
+        block_on(client.hash_delete(k("h"), vec![b"f".to_vec()])).map(drop),
+        // Refused even when there would be nothing to do.
+        block_on(client.hash_delete(k("h"), Vec::new())).map(drop),
+        block_on(client.hash_rename_field(k("h"), b"f".to_vec(), v(), None, true)),
+        block_on(client.list_push(k("l"), vec![v()], ListEnd::Head)).map(drop),
+        block_on(client.list_set(k("l"), 0, b"b".to_vec(), v())),
+        block_on(client.list_remove_at(k("l"), vec![(0, b"b".to_vec())])).map(drop),
+        block_on(client.list_remove(k("l"), b"a".to_vec())).map(drop),
+        block_on(client.set_add(k("st"), vec![v()])).map(drop),
+        block_on(client.set_remove(k("st"), vec![b"a".to_vec()])).map(drop),
+        block_on(client.set_replace(k("st"), b"a".to_vec(), v(), true)).map(drop),
+        block_on(client.zset_add(k("z"), v(), 1.0, true)).map(drop),
+        block_on(client.zset_rename_member(k("z"), b"a".to_vec(), v(), Some(2.0), true)),
+        block_on(client.zset_remove(k("z"), vec![b"a".to_vec()])).map(drop),
+        block_on(client.stream_add(k("x"), "*".into(), vec![(v(), v())])).map(drop),
+        block_on(client.stream_delete(k("x"), vec!["1-1".into()])).map(drop),
+        block_on(client.create_key(k("new"), NewValue::String(v()), Some(10))),
+        block_on(client.create_key(k("new"), NewValue::Hash(vec![(v(), v())]), None)),
+    ]
+}
+
 #[test]
 fn every_mutating_method_is_refused() {
     let Some(t) = it!() else { return };
@@ -146,16 +175,23 @@ fn every_mutating_method_is_refused() {
     assert_eq!(writable.ensure_writable(), Ok(()));
 
     let k = |name: &str| t.bkey(name);
-    let failures = [
+    let mut failures = vec![
         block_on(client.delete(vec![k("s"), k("h")])).map(drop),
         // Refused even when there would be nothing to do.
         block_on(client.delete(Vec::new())).map(drop),
         block_on(client.rename(k("s"), k("renamed"))),
         block_on(client.set_ttl(k("h"), Some(100))).map(drop),
         block_on(client.set_ttl(k("s"), None)).map(drop),
-        block_on(client.set_string(k("s"), b"after".to_vec())),
         block_on(client.set_string(k("new"), b"created".to_vec())),
     ];
+    failures.extend(every_change(&client, &k));
+    // The edit models' changes go through the same methods.
+    let loaded = block_on(viewer::load(&client, k("h"))).unwrap();
+    let delete = loaded.delete_rows(&[0]).unwrap();
+    failures.push(block_on(delete.send(&client)).map(drop));
+    let create = viewer::new_key(viewer::NewKeyType::String, &t.key("n"), "", "v", "1h").unwrap();
+    failures.push(block_on(create.send(&client)).map(drop));
+    assert!(failures.len() > 25);
     for result in failures {
         let err = result.expect_err("a read-only client changed the server");
         let read_only = err
@@ -202,7 +238,9 @@ fn nothing_reaches_the_server() {
     let _ = block_on(client.rename(k(), t.bkey("other"))).unwrap_err();
     let _ = block_on(client.set_ttl(k(), Some(1))).unwrap_err();
     let _ = block_on(client.set_ttl(k(), None)).unwrap_err();
-    let _ = block_on(client.set_string(k(), b"x".to_vec())).unwrap_err();
+    for result in every_change(&client, &|_| k()) {
+        result.unwrap_err();
+    }
     // A console of a read-only client connects on its first allowed
     // command; refused ones never get that far.
     let console = client.console();

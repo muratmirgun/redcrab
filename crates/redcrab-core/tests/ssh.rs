@@ -179,7 +179,7 @@ fn key_auth_reaches_a_server_only_the_ssh_host_can_see() {
     assert!(local.ip().is_loopback());
 
     let key = t.bkey("hello");
-    block_on(client.set_string(key.clone(), b"through \xff ssh".to_vec())).unwrap();
+    put_string(&client, &key, b"through \xff ssh");
     assert_eq!(get(&client, &key), b"through \xff ssh");
     let info = block_on(client.server_info()).unwrap();
     assert_eq!(info.mode.as_deref(), Some("standalone"));
@@ -196,7 +196,7 @@ fn password_auth_works_and_wrong_passwords_are_refused() {
     let dir = TempDir::new(&t);
     let client = connect(through(password("tunnelpass")), pinned(&dir.path("kh")));
     let key = t.bkey("pw");
-    block_on(client.set_string(key.clone(), b"ok".to_vec())).unwrap();
+    put_string(&client, &key, b"ok");
     assert_eq!(get(&client, &key), b"ok");
 
     let err = format!(
@@ -446,7 +446,7 @@ fn the_tunnel_carries_many_commands_at_once() {
     // Hundreds of round trips, one after another.
     for i in 0..400 {
         let key = t.bkey(format!("seq:{}", i % 20));
-        block_on(client.set_string(key.clone(), format!("{i}").into_bytes())).unwrap();
+        put_string(&client, &key, format!("{i}"));
         assert_eq!(get(&client, &key), format!("{i}").into_bytes());
     }
 
@@ -461,7 +461,7 @@ fn the_tunnel_carries_many_commands_at_once() {
                 for i in 0..100 {
                     let key: Key = format!("{prefix}{i}").into_bytes().into();
                     let value = format!("{worker}-{i}-{}", "x".repeat(i * 37)).into_bytes();
-                    block_on(client.set_string(key.clone(), value.clone())).unwrap();
+                    put_string(&client, &key, value.clone());
                     assert_eq!(get(&client, &key), value);
                     let line = format!("STRLEN {prefix}{i}");
                     assert_eq!(
@@ -479,7 +479,7 @@ fn the_tunnel_carries_many_commands_at_once() {
     // Large values cross the tunnel's flow control both ways.
     let big = t.bkey("big");
     let value: Vec<u8> = (0..3 << 20).map(|i: u32| (i % 251) as u8).collect();
-    block_on(client.set_string(big.clone(), value.clone())).unwrap();
+    put_string(&client, &big, value.clone());
     let preview = get(&client, &big);
     assert_eq!(preview, value[..preview.len()]);
     assert_eq!(

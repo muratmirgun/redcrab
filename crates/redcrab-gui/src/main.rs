@@ -3,6 +3,7 @@ mod assets;
 mod bulk;
 mod connect;
 mod console;
+mod edit;
 mod keys;
 mod style;
 mod value;
@@ -30,6 +31,8 @@ gpui_kit::actions!(
         Expand,
         Collapse,
         StopCommand,
+        SaveValue,
+        NewKey,
     ]
 );
 
@@ -67,6 +70,8 @@ fn main() {
                 KeyBinding::new("cmd-f", FocusSearch, Some("Workspace")),
                 KeyBinding::new("cmd-backspace", DeleteKey, Some("Workspace")),
                 KeyBinding::new("cmd-j", ToggleConsole, Some("Workspace")),
+                KeyBinding::new("cmd-s", SaveValue, Some("Workspace")),
+                KeyBinding::new("cmd-shift-n", NewKey, Some("Workspace")),
                 KeyBinding::new("up", SelectPrev, Some("KeyList")),
                 KeyBinding::new("down", SelectNext, Some("KeyList")),
                 KeyBinding::new("right", Expand, Some("KeyList")),

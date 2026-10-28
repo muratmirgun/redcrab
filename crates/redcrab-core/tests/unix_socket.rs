@@ -106,7 +106,7 @@ fn everything_works_over_a_unix_socket() {
 
     let keys: Vec<_> = (0..50).map(|i| t.bkey(format!("k{i}"))).collect();
     for key in &keys {
-        block_on(client.set_string(key.clone(), b"v \xff".to_vec())).unwrap();
+        put_string(&client, key, b"v \xff");
     }
     let mut seed = t.seed0();
     let stored: Vec<u8> = redis::cmd("GET").arg(&*keys[0]).query(&mut seed).unwrap();
@@ -148,7 +148,7 @@ fn the_database_user_and_password_go_through_the_socket() {
         ..proxy.config()
     });
     let key = t.bkey("in-db");
-    block_on(client.set_string(key.clone(), b"x".to_vec())).unwrap();
+    put_string(&client, &key, b"x");
     let mut db = t.seed(Server::Standalone, CONSOLE_DB);
     let exists: bool = redis::cmd("EXISTS").arg(&*key).query(&mut db).unwrap();
     assert!(exists, "written to database {CONSOLE_DB}");

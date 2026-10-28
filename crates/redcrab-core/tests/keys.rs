@@ -8,7 +8,7 @@
 mod common;
 
 use common::*;
-use redcrab_core::{Key, KeyMeta, KeyType};
+use redcrab_core::{EditError, Key, KeyMeta, KeyType};
 use redis::Connection;
 
 fn pttl(con: &mut Connection, key: &[u8]) -> i64 {
@@ -266,7 +266,8 @@ fn rename_of_a_missing_key_fails() {
     let Some(t) = it!() else { return };
     let client = t.connect(standalone());
     let err = block_on(client.rename(t.bkey("missing"), t.bkey("new"))).unwrap_err();
-    assert!(format!("{err:#}").contains("no such key"), "{err:#}");
+    assert_eq!(err.downcast_ref(), Some(&EditError::KeyMissing), "{err:#}");
+    assert_eq!(err.to_string(), "the key no longer exists");
     assert!(!exists(&mut t.seed0(), &t.bkey("new")));
 }
 
@@ -291,11 +292,18 @@ fn set_ttl_and_persist() {
     assert!(!set_ttl(&key, None), "nothing to persist");
     assert_eq!(get(&mut con, &key).as_deref(), Some(&b"v"[..]));
 
-    // A missing key is not created.
+    // A missing key is not created, and says so.
     let missing = t.bkey("missing");
-    assert!(!set_ttl(&missing, Some(10)));
-    assert!(!set_ttl(&missing, None));
+    for seconds in [Some(10), None] {
+        let err = block_on(client.set_ttl(missing.clone(), seconds)).unwrap_err();
+        assert_eq!(err.downcast_ref(), Some(&EditError::KeyMissing), "{err:#}");
+    }
     assert!(!exists(&mut con, &missing));
+
+    // A TTL of 0 would delete the key.
+    let err = block_on(client.set_ttl(key.clone(), Some(0))).unwrap_err();
+    assert!(err.to_string().contains("delete"), "{err:#}");
+    assert!(exists(&mut con, &key));
 }
 
 #[test]
@@ -332,13 +340,39 @@ fn set_string_keeps_the_ttl() {
     assert!((98_000..=100_000).contains(&pttl(&mut con, &t.bkey("expiring"))));
     save("forever", b"new");
     assert_eq!(pttl(&mut con, &t.bkey("forever")), -1);
-    save("created", b"fresh");
-    assert_eq!(pttl(&mut con, &t.bkey("created")), -1);
 
     // Values are bytes, of any size.
-    save("binary", b"\x00\xff\xfe\r\n\x80 end");
-    save("empty", b"");
-    assert!(exists(&mut con, &t.bkey("empty")));
+    save("forever", b"\x00\xff\xfe\r\n\x80 end");
+    save("forever", b"");
+    assert!(exists(&mut con, &t.bkey("forever")));
     let big: Vec<u8> = (0..2 << 20).map(|i| (i % 253) as u8).collect();
-    save("big", &big);
+    save("forever", &big);
+}
+
+/// An edit is of the value that was loaded: a key deleted since is not
+/// created again, and one replaced by another type is not overwritten.
+#[test]
+fn set_string_refuses_missing_and_other_keys() {
+    let Some(t) = it!() else { return };
+    let mut con = t.seed0();
+    redis::cmd("RPUSH")
+        .arg(t.key("list"))
+        .arg("x")
+        .query::<()>(&mut con)
+        .unwrap();
+    let client = t.connect(standalone());
+    let err = block_on(client.set_string(t.bkey("missing"), b"v".to_vec())).unwrap_err();
+    assert_eq!(err.downcast_ref(), Some(&EditError::KeyMissing));
+    assert!(!exists(&mut con, &t.bkey("missing")));
+    let err = block_on(client.set_string(t.bkey("list"), b"v".to_vec())).unwrap_err();
+    assert_eq!(
+        err.downcast_ref(),
+        Some(&EditError::WrongType("list".into()))
+    );
+    assert_eq!(err.to_string(), "the key now holds a value of type list");
+    let len: i64 = redis::cmd("LLEN")
+        .arg(t.key("list"))
+        .query(&mut con)
+        .unwrap();
+    assert_eq!(len, 1);
 }

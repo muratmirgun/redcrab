@@ -5867,8 +5867,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
+ "base64 0.22.1",
  "data-encoding",
  "dirs 6.0.0",
+ "flate2",
  "foldhash",
  "futures",
  "hashbrown 0.16.1",

@@ -1,5 +1,6 @@
 use super::*;
-use crate::value::StreamEntry;
+
+use crate::{formats::ValueFormat, value::StreamEntry};
 
 fn loaded(ty: KeyType, data: ValueData, total: u64, next: Option<Cursor>) -> Loaded {
     Loaded::new(
@@ -195,16 +196,24 @@ fn strings_are_editable_only_when_whole_and_writable() {
         3,
         None,
     );
+    // Quoted like redis-cli, so the escapes read back as the same bytes.
     let text = binary.text(true).unwrap();
+    assert_eq!(text.text, r#""a\x00b""#);
+    assert!(text.editable);
+    // Shown for reading only, escaped without quotes.
+    let text = TextValue::new(b"a\x00b", true);
     assert_eq!(text.text, "a\\x00b");
     assert!(
         !text.editable,
         "escaped text would not save back the same bytes"
     );
 
+    // JSON documents are saved with JSON.SET, and only as JSON.
     let json = loaded(KeyType::Json, ValueData::Json(r#"{"a":1}"#.into()), 7, None);
     let text = json.text(true).unwrap();
-    assert!(text.is_json && !text.editable);
+    assert!(text.is_json && text.editable);
+    assert!(!json.text(false).unwrap().editable, "read-only connection");
+    assert_eq!(json.text_edit(true).unwrap().formats(), [ValueFormat::Json]);
 }
 
 #[test]
@@ -311,11 +320,88 @@ fn saves_edited_json_in_the_spacing_it_was_stored_in() {
         assert_eq!(text.bytes_to_save(&edited), edited.as_bytes(), "{stored}");
     }
 
-    // Line breaks that would show as `\r` escapes: indented for reading,
-    // and not editable, as before.
-    let text = TextValue::new(b"{\r\n  \"a\": 1\r\n}", true);
-    assert!(text.is_json && text.reformatted_json && !text.editable);
-    assert_eq!(text.text, "{\n  \"a\": 1\n}");
+    // CRLF line breaks (JSON written on Windows): shown as LF, as laid
+    // out, editable, and saved with CRLF again.
+    let stored = "{\r\n    \"a\": 1,\r\n    \"b\": [true]\r\n}\r\n";
+    let text = TextValue::new(stored.as_bytes(), true);
+    assert!(text.is_json && !text.reformatted_json && text.editable);
+    assert_eq!(text.notice, None);
+    assert_eq!(text.text, stored.replace("\r\n", "\n"));
+    assert_eq!(text.bytes_to_save(&text.text), stored.as_bytes());
+    let edited = text.text.replace('1', "2");
+    assert_eq!(
+        text.bytes_to_save(&edited),
+        stored.replace('1', "2").as_bytes()
+    );
+    assert_eq!(
+        text.bytes_to_save(&format!("{edited}\n")),
+        format!("{}\r\n", stored.replace('1', "2")).as_bytes()
+    );
+
+    // A lone `\r`, or line breaks of both kinds: they would not stay as
+    // they are, so indented for reading, read-only, and saying so.
+    for stored in ["{\"a\":\r1}", "{\r\n\"a\": 1\n}"] {
+        let text = TextValue::new(stored.as_bytes(), true);
+        assert!(text.is_json && !text.editable, "{stored:?}");
+        let notice = text.notice.unwrap();
+        assert!(
+            notice.contains("JSON") && notice.contains("Text"),
+            "{notice}"
+        );
+    }
+}
+
+/// Picking rows for deleting never throws away what was typed into the
+/// open one.
+#[test]
+fn row_clicks_keep_unsaved_edits() {
+    let mut picked = BTreeSet::new();
+    // A click opens a row and picks it.
+    assert_eq!(
+        click_row(&mut picked, None, false, 1, false),
+        RowClick::Open(1)
+    );
+    assert_eq!(picked, BTreeSet::from([1]));
+    // ⌘-clicks pick more, or fewer, and leave the open row (edited or not).
+    for dirty in [false, true] {
+        assert_eq!(
+            click_row(&mut picked, Some(1), dirty, 3, true),
+            RowClick::Keep
+        );
+        assert_eq!(
+            click_row(&mut picked, Some(1), dirty, 4, true),
+            RowClick::Keep
+        );
+        assert_eq!(picked, BTreeSet::from([1, 3, 4]));
+        assert_eq!(
+            click_row(&mut picked, Some(1), dirty, 3, true),
+            RowClick::Keep
+        );
+        assert_eq!(
+            click_row(&mut picked, Some(1), dirty, 4, true),
+            RowClick::Keep
+        );
+    }
+    assert_eq!(picked, BTreeSet::from([1]));
+    // Another row while the open one has edits: ask, change nothing yet.
+    assert_eq!(
+        click_row(&mut picked, Some(1), true, 2, false),
+        RowClick::AskFirst(2)
+    );
+    assert_eq!(picked, BTreeSet::from([1]));
+    // Agreed to: open it.
+    assert_eq!(
+        click_row(&mut picked, Some(1), false, 2, false),
+        RowClick::Open(2)
+    );
+    assert_eq!(picked, BTreeSet::from([2]));
+    // The open row itself: kept as it is, edits and all.
+    picked.insert(5);
+    assert_eq!(
+        click_row(&mut picked, Some(2), true, 2, false),
+        RowClick::Keep
+    );
+    assert_eq!(picked, BTreeSet::from([2]));
 }
 
 #[test]

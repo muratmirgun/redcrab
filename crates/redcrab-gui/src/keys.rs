@@ -1,8 +1,8 @@
-use std::{ops::Range, time::Duration};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use futures::StreamExt as _;
 use gpui_kit::{
-    AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
     WeakEntity, Window,
@@ -26,11 +26,13 @@ use redcrab_core::{
     browser::{self, RowId, Selection},
     bulk::{Refresh, Target},
     format,
+    viewer::{Mutation, Outcome},
 };
 
 use crate::{
     Collapse, Expand, SelectNext, SelectPrev,
     bulk::{BulkDeleteView, BulkEvent},
+    edit::{self, ChangeForm, OnDone},
     style,
 };
 
@@ -491,6 +493,50 @@ impl KeyBrowser {
         }
     }
 
+    /// Shows a key created or renamed in the app, selected, without
+    /// rescanning.
+    pub fn add_key(&mut self, key: &[u8], cx: &mut Context<Self>) {
+        if let Some(ix) = self.model.add_key(key) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    /// Fetches a key's type and TTL again after a change.
+    pub fn forget_meta(&mut self, key: &[u8], cx: &mut Context<Self>) {
+        self.model.forget_meta(key);
+        cx.notify();
+    }
+
+    /// Opens the new key dialog; the key it creates is selected and shown.
+    pub fn new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Not while the list is about to move to another database either.
+        if self.client.config().read_only || self.switching.is_some() {
+            return;
+        }
+        let this = cx.weak_entity();
+        let client = self.client.clone();
+        let created_on = client.clone();
+        let on_done: OnDone = Rc::new(
+            move |mutation: Mutation, outcome: Outcome, window: &mut Window, cx: &mut App| {
+                window
+                    .push_notification(Notification::success(mutation.done_message(&outcome)), cx);
+                let key = mutation.key().clone();
+                this.update(cx, |this, cx| {
+                    // Only if the list still shows the database the key
+                    // was created in.
+                    if created_on.same_connection(&this.client) {
+                        this.add_key(&key, cx);
+                        cx.emit(KeyEvent::Selected(key));
+                    }
+                })
+                .ok();
+            },
+        );
+        let form = cx.new(|cx| ChangeForm::new_key(client, on_done, window, cx));
+        edit::open(form, "New key", window, cx);
+    }
+
     /// A click acts on the row as it was drawn: keys streaming in can move
     /// rows before the frame the user clicked in is replaced.
     fn on_row_click(&mut self, row: RowId, window: &mut Window, cx: &mut Context<Self>) {
@@ -744,6 +790,18 @@ impl Render for KeyBrowser {
                             ),
                         ),
                     )
+                    .when(!self.client.config().read_only, |this| {
+                        this.child(
+                            Button::new("new-key")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Plus)
+                                .tooltip("New key (⇧⌘N)")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.new_key(window, cx)),
+                                ),
+                        )
+                    })
                     .child(
                         Button::new("collapse-all")
                             .ghost()
