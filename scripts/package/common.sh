@@ -28,6 +28,23 @@ trap 'rm -rf "${WORK:?}"' EXIT
 
 log() { printf '==> %s\n' "$*" >&2; }
 
+# Packages update themselves from GitHub releases (redcrab_core::update); a
+# build from source or by a distribution does not. Set to 0 to build a
+# package that never looks for updates.
+export REDCRAB_SELF_UPDATE="${REDCRAB_SELF_UPDATE-1}"
+
+# Checks that the executable $1 says exactly `redcrab <version>` to
+# --version (without opening a window): before an update replaces the
+# running copy, it asks the new one the same.
+answers_version() {
+    local said
+    said=$("$1" --version)
+    if [ "$said" != "redcrab $VERSION" ]; then
+        echo "$1 says '$said' to --version, not 'redcrab $VERSION'" >&2
+        exit 1
+    fi
+}
+
 # Writes a SHA-256 line for each given file next to it, as `<file>.sha256`,
 # in the format `sha256sum -c` reads.
 checksum() {

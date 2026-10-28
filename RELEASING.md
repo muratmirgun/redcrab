@@ -13,12 +13,37 @@
    universal `.dmg`, the Linux `.tar.gz` and `.deb` for x86_64 and aarch64, and the
    Windows `.zip`, checks that each one starts, and creates a **draft** release with the
    files, a `SHA256SUMS` file and notes generated from the commits.
-4. Read the draft on GitHub, edit the notes if needed, and publish it.
+4. Read the draft on GitHub, edit the notes if needed, and publish it. Installed
+   copies (0.2.0 and later) offer it within a day; they never see a draft.
 
 Packaging changes are tried out before a release: pushes to `main` that touch
 `scripts/package/`, the release workflow, `assets/logo/` or the GUI's `build.rs` run the
 same builds without publishing anything. The scripts also run locally (see the README's
 "Packaging" section).
+
+## Update signing key
+
+Installed copies update themselves only to a release whose `SHA256SUMS` is signed with
+the release key (`crates/redcrab-core/src/update/`), so a tag does not publish without
+it. The private key is the repository secret `UPDATE_SIGNING_KEY`: the whole PEM
+file, `-----BEGIN PRIVATE KEY-----` to `-----END PRIVATE KEY-----`. Its public half,
+built into the app, is
+[`release-key.pub.pem`](crates/redcrab-core/src/update/release-key.pub.pem). The
+publish job signs with the secret and checks the signature against that file.
+
+Keep a copy of the private key somewhere safe, such as a password manager: GitHub
+does not show a secret again. If it is lost or leaks, make a new pair:
+
+```sh
+openssl genpkey -algorithm ed25519 -out update-signing-key.pem
+openssl pkey -in update-signing-key.pem -pubout \
+  -out crates/redcrab-core/src/update/release-key.pub.pem
+```
+
+Copies already installed trust only the old key, so they cannot update to a release
+signed with the new one and need one manual download. When the old key is still safe
+(a planned change), that is avoidable: release once more with the old key as the
+secret and the new public key in the source, then switch the secret.
 
 ## macOS signing and notarization
 

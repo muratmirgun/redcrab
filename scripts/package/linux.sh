@@ -18,7 +18,7 @@ esac
 log "building"
 cargo build -p redcrab-gui --release --locked
 binary="$TARGET_DIR/release/redcrab"
-"$binary" --version
+answers_version "$binary"
 
 log "rendering icons"
 icons="$WORK/icons"

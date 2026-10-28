@@ -15,10 +15,9 @@ esac
 log "building"
 cargo build -p redcrab-gui --release --locked
 exe="$TARGET_DIR/release/redcrab.exe"
-[ -f "$exe" ] || {
-    echo "$exe was not built" >&2
-    exit 1
-}
+# A GUI program on Windows, yet it answers --version on the pipe it is
+# given, as the updater needs.
+answers_version "$exe"
 
 name="redcrab-$VERSION-windows-$arch"
 folder="$WORK/$name"

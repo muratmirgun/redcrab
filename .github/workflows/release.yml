@@ -7,7 +7,8 @@
 # publishing, so a broken package shows up before the next release.
 #
 # macOS signing is optional and switches on with repository secrets (see
-# RELEASING.md); without them the app is ad-hoc signed.
+# RELEASING.md); without them the app is ad-hoc signed. The update signature
+# is not optional: a tag fails to publish without UPDATE_SIGNING_KEY.
 name: Release
 
 on:
@@ -216,6 +217,26 @@ jobs:
           cat ./*.sha256 >SHA256SUMS
           rm ./*.sha256
           sha256sum -c SHA256SUMS
+
+      # Installed copies update only to a release whose SHA256SUMS carries
+      # this signature (redcrab_core::update), checked against the public
+      # key built into them, which this step checks it against too.
+      - name: Sign the checksums
+        working-directory: dist
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::The UPDATE_SIGNING_KEY secret is missing; installed copies could not update to this release (see RELEASING.md)."
+            exit 1
+          fi
+          key="$RUNNER_TEMP/update-signing-key.pem"
+          (umask 077 && printf '%s\n' "$UPDATE_SIGNING_KEY" >"$key")
+          openssl pkeyutl -sign -rawin -inkey "$key" -in SHA256SUMS -out SHA256SUMS.sig
+          rm "$key"
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey ../crates/redcrab-core/src/update/release-key.pub.pem \
+            -in SHA256SUMS -sigfile SHA256SUMS.sig
 
       # A draft, so the notes and files can be checked before publishing.
       - name: Create the draft release

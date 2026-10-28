@@ -107,7 +107,7 @@ fi
 codesign --verify --strict --verbose=2 "$app"
 
 # The bundle must run: the binary answers --version without opening a window.
-"$app/Contents/MacOS/redcrab" --version
+answers_version "$app/Contents/MacOS/redcrab"
 
 dmg="$DIST/redcrab-$VERSION-macos-$arch.dmg"
 staging="$WORK/dmg"
