@@ -115,7 +115,7 @@ fn credential_parameter(name: &[u8]) -> bool {
 /// AUTH2, the short field names `pass` and `pw`, anything mentioning a
 /// password, a secret or a token (`password`, `passwd`, `pwd`,
 /// `requirepass`, `auth-pass`, `client_secret`, `api-key`, `access_token`,
-/// `bearer`, `credentials`, `session_key`, ...), and URLs with credentials
+/// `bearer`, `session_key`, ...), and URLs with credentials
 /// (`redis://user:pw@host`). `pass` and `pw` only as whole words: as parts
 /// they are in too many words (`compass`, `bypass`, `pwm`).
 ///
@@ -146,7 +146,6 @@ pub(crate) fn credential_like(arg: &[u8]) -> bool {
             // `github-token`, `Bearer`, `session_key`.
             "token",
             "bearer",
-            "credential",
             "session_key",
             "session-key",
             "sessionkey",
@@ -378,7 +377,6 @@ mod tests {
             "SET token abc",
             "HSET cfg bearer xyz",
             "HSET cfg Authorization \"Bearer xyz\"",
-            "HSET cfg credentials s3cret",
             "HSET web session_key k1",
             "CONFIG SET search.api-token abc",
             "CONFIG SET mymod.api-key abc",
