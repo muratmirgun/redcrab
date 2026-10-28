@@ -184,6 +184,21 @@ impl Mutation {
         }
     }
 
+    /// Whether the change, as the server answered it, deleted its key:
+    /// it removed the last element of a hash, list, set or sorted set
+    /// (Redis keeps an empty stream). For a change to a key that is not
+    /// loaded; [`Loaded::apply`] says the same as [`Applied::KeyGone`].
+    pub fn deleted_key(&self, outcome: &Outcome) -> bool {
+        let collection = matches!(
+            self,
+            Self::HashDelete { .. }
+                | Self::ListRemoveAt { .. }
+                | Self::SetRemove { .. }
+                | Self::ZSetRemove { .. }
+        );
+        collection && matches!(outcome, Outcome::Removed(Removed { left: 0, .. }))
+    }
+
     /// Sends the change. Refusals come back as
     /// [`EditError`](crate::EditError)s, a read-only connection's as a
     /// [`ReadOnlyError`](crate::ReadOnlyError).

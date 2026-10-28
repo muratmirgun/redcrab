@@ -731,6 +731,37 @@ impl KeyBrowser {
         self.selected_index()
     }
 
+    /// Adds a key renamed in the app while the user had moved on to another
+    /// one: it shows (with its folders as they are), the selection stays
+    /// where the user put it. Returns whether the tree gained a key.
+    pub fn insert_key(&mut self, key: &[u8]) -> bool {
+        let added = {
+            let mut tree = self.tree();
+            let had = tree.contains(key);
+            tree.insert(key);
+            !had && tree.contains(key)
+        };
+        if added {
+            self.recount();
+            self.rows_dirty = true;
+        }
+        added
+    }
+
+    /// Selects `key` again, as a front end does when the user decided to
+    /// stay on the key shown (say, to keep unsaved edits) after picking
+    /// another one. Folders are left as they are. Returns its row, if it
+    /// is a key on one.
+    pub fn select_key(&mut self, key: &[u8]) -> Option<usize> {
+        let node = {
+            let tree = self.tree();
+            tree.find(key).filter(|&node| tree.is_key(node))?
+        };
+        self.selected = Some((node, RowKind::Key));
+        self.reselect = None;
+        self.selected_index()
+    }
+
     /// Forgets a key's type and TTL, so the next frame that shows it asks
     /// again (after its TTL or type changed).
     pub fn forget_meta(&mut self, key: &[u8]) {

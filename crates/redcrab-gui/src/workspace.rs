@@ -83,10 +83,16 @@ impl Workspace {
                 ValueEvent::Deleted(key) => {
                     this.keys.update(cx, |keys, cx| keys.remove_key(key, cx));
                 }
-                ValueEvent::Renamed { from, to } => {
+                ValueEvent::Renamed { from, to, shown } => {
                     this.keys.update(cx, |keys, cx| {
                         keys.remove_key(from, cx);
-                        keys.add_key(to, cx);
+                        // Selected only if it is the key shown; the user
+                        // may have moved on while the rename was on its way.
+                        if *shown {
+                            keys.add_key(to, cx);
+                        } else {
+                            keys.insert_key(to, cx);
+                        }
                     });
                 }
                 ValueEvent::Changed(key) => {

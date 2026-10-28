@@ -431,6 +431,42 @@ fn patterns_that_match_every_key_are_no_filter() {
 }
 
 #[test]
+fn keys_renamed_elsewhere_and_reselected_keys_leave_the_view_alone() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a", "b", "user:1"]);
+    browser.collapse_all();
+    browser.select_next();
+    browser.select_next();
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"a"[..]));
+    // A key renamed while another is shown: it appears, the selection
+    // and the closed folders stay, the count follows.
+    browser.remove_key(b"b");
+    assert!(browser.insert_key(b"user:2"));
+    assert!(!browser.insert_key(b"user:2"), "already there");
+    assert_eq!(labels(&mut browser), ["+user/ (2)", "a *"]);
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"a"[..]));
+    assert!(
+        browser.status_text().starts_with("3 keys"),
+        "{}",
+        browser.status_text()
+    );
+
+    // Back to a key after moving away from it.
+    browser.select_prev();
+    assert_eq!(browser.selected_key(), None, "the folder row");
+    assert_eq!(browser.select_key(b"a"), Some(1));
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"a"[..]));
+    // A key in a closed folder is selected, though not on a row.
+    assert_eq!(browser.select_key(b"user:1"), None);
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"user:1"[..]));
+    assert_eq!(labels(&mut browser), ["+user/ (2)", "a"]);
+    // A folder or a key that is gone is not.
+    assert_eq!(browser.select_key(b"user"), None);
+    assert_eq!(browser.select_key(b"gone"), None);
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"user:1"[..]));
+}
+
+#[test]
 fn renames_and_new_keys_keep_the_count_of_a_finished_scan() {
     let mut browser = KeyBrowser::new(b':', None);
     scan(&mut browser, "", &["a", "b", "c"]);

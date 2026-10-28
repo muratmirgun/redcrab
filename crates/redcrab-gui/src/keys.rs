@@ -507,6 +507,13 @@ impl KeyBrowser {
         cx.notify();
     }
 
+    /// Shows a key renamed in the app without selecting it or rescanning.
+    pub fn insert_key(&mut self, key: &[u8], cx: &mut Context<Self>) {
+        if self.model.insert_key(key) {
+            cx.notify();
+        }
+    }
+
     /// Fetches a key's type and TTL again after a change.
     pub fn forget_meta(&mut self, key: &[u8], cx: &mut Context<Self>) {
         self.model.forget_meta(key);

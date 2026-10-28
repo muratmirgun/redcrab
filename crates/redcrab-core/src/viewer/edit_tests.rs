@@ -1168,3 +1168,48 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn removing_the_last_elements_deletes_the_key() {
+    let gone = removed(2, 0);
+    let left = removed(1, 1);
+    for mutation in [
+        Mutation::HashDelete {
+            key: key(),
+            fields: bytes(&["a", "b"]),
+        },
+        Mutation::ListRemoveAt {
+            key: key(),
+            elements: vec![(0, b"a".to_vec())],
+        },
+        Mutation::SetRemove {
+            key: key(),
+            members: bytes(&["a"]),
+        },
+        Mutation::ZSetRemove {
+            key: key(),
+            members: bytes(&["a"]),
+        },
+    ] {
+        assert!(mutation.deleted_key(&gone), "{mutation:?}");
+        assert!(!mutation.deleted_key(&left), "{mutation:?}");
+    }
+    // Redis keeps an empty stream; other changes never empty a key.
+    let stream = Mutation::StreamDelete {
+        key: key(),
+        ids: vec!["1-1".into()],
+    };
+    assert!(!stream.deleted_key(&gone));
+    let rename = Mutation::Rename {
+        from: key(),
+        to: Key::from(&b"k2"[..]),
+    };
+    assert!(!rename.deleted_key(&Outcome::Done));
+    // The same as applying it to the loaded value says.
+    let mut value = hash(&[("a", "1"), ("b", "2")]);
+    let delete = Mutation::HashDelete {
+        key: key(),
+        fields: bytes(&["a", "b"]),
+    };
+    assert_eq!(value.apply(&delete, &gone), Applied::KeyGone);
+}

@@ -37,10 +37,12 @@ const NARROW_COLUMN: f32 = 150.;
 
 pub enum ValueEvent {
     Deleted(Key),
-    /// The key shown was renamed.
+    /// A key was renamed: the one shown (`shown`), or one the panel showed
+    /// when the rename was sent.
     Renamed {
         from: Key,
         to: Key,
+        shown: bool,
     },
     /// The key's type or TTL changed.
     Changed(Key),
@@ -143,6 +145,9 @@ impl ValuePanel {
 
     pub fn load(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
         self.key = Some(key.clone());
+        // A change to the key shown before may still be on its way; it no
+        // longer holds up saving this one (see `finished`).
+        self.saving = false;
         self.loaded = None;
         self.text = None;
         self.row = None;
@@ -224,6 +229,7 @@ impl ValuePanel {
         self.picked.clear();
         self.error = None;
         self.confirm_delete = false;
+        self.saving = false;
         self.loading = false;
         self.loading_more = false;
         self._load = None;
@@ -416,20 +422,81 @@ impl ValuePanel {
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
-                this.saving = false;
-                if client.same_connection(&this.client) {
-                    match result {
-                        Ok(outcome) => this.done(mutation, outcome, window, cx),
-                        Err(err) => this.refused(client, mutation, err, window, cx),
-                    }
-                } else {
-                    Self::elsewhere(&client, &mutation, result, window, cx);
-                }
+                this.finished(client, mutation, result, window, cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Shows how a change sent on `client` ended, wherever the panel is
+    /// now: on the value shown if it is still the one changed, else only
+    /// as a notification (and in the key list).
+    fn finished(
+        &mut self,
+        client: Client,
+        mutation: Mutation,
+        result: anyhow::Result<Outcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = self.key.as_ref() == Some(mutation.key());
+        if shown {
+            self.saving = false;
+        }
+        if !client.same_connection(&self.client) {
+            Self::elsewhere(&client, &mutation, result, window, cx);
+        } else if !shown {
+            self.other_key(mutation, result, window, cx);
+        } else {
+            match result {
+                Ok(outcome) => self.done(mutation, outcome, window, cx),
+                Err(err) => self.refused(client, mutation, err, window, cx),
+            }
+        }
+    }
+
+    /// Reports a change to a key the user moved away from while it was on
+    /// its way. The value shown now is another key's, so nothing is
+    /// patched, reloaded or asked about; the key list still catches up.
+    fn other_key(
+        &mut self,
+        mutation: Mutation,
+        result: anyhow::Result<Outcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = mutation.key().clone();
+        let name = format::bytes_inline(&key).into_owned();
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                window.push_notification(
+                    Notification::error(format!("{err:#}")).title(format!("Saving {name} failed")),
+                    cx,
+                );
+                return;
+            }
+        };
+        let note = match &mutation {
+            Mutation::Rename { .. } => mutation.done_message(&outcome),
+            _ => format!("{} ({name})", mutation.done_message(&outcome)),
+        };
+        window.push_notification(Notification::success(note), cx);
+        if mutation.deleted_key(&outcome) {
+            cx.emit(ValueEvent::Deleted(key));
+            return;
+        }
+        match mutation {
+            Mutation::Rename { from, to } => cx.emit(ValueEvent::Renamed {
+                from,
+                to,
+                shown: false,
+            }),
+            Mutation::SetTtl { key, .. } => cx.emit(ValueEvent::Changed(key)),
+            _ => {}
+        }
     }
 
     /// Reports a change that ran on a connection (a database) the panel has
@@ -525,6 +592,7 @@ impl ValuePanel {
                 cx.emit(ValueEvent::Renamed {
                     from: from.clone(),
                     to: to.clone(),
+                    shown: true,
                 });
             }
             Mutation::SetTtl { key, .. } => cx.emit(ValueEvent::Changed(key.clone())),
@@ -801,12 +869,13 @@ impl ValuePanel {
         let client = self.client.clone();
         Rc::new(
             move |mutation: Mutation, outcome: Outcome, window: &mut Window, cx: &mut App| {
+                let client = client.clone();
                 this.update(cx, |this, cx| {
-                    if client.same_connection(&this.client) {
-                        this.done(mutation, outcome, window, cx);
-                    } else {
-                        Self::elsewhere(&client, &mutation, Ok(outcome), window, cx);
-                    }
+                    // Not holding up saves: dialogs do not set `saving`.
+                    let saving = this.saving;
+                    this.finished(client, mutation, Ok(outcome), window, cx);
+                    this.saving = saving;
+                    cx.notify();
                 })
                 .ok();
             },
