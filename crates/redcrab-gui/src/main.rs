@@ -1,5 +1,6 @@
 mod app;
 mod assets;
+mod bulk;
 mod connect;
 mod console;
 mod keys;

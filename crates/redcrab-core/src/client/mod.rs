@@ -8,10 +8,12 @@
 //! `sentinel`.
 
 mod admin;
+mod bulk;
 mod cluster;
 mod conn;
 mod connector;
 mod console;
+mod databases;
 mod keys;
 mod sentinel;
 mod values;
@@ -30,9 +32,11 @@ use redis::{
     cmd,
 };
 
+pub use self::bulk::{COUNT_EXACT_MAX, DELETE_BATCH, DeleteProgress, DeleteStats, ScanProgress};
 pub use self::cluster::key_slot;
 pub(crate) use self::conn::Conn;
 pub use self::console::ConsoleSession;
+pub use self::databases::DbInfo;
 use self::{cluster::Cluster, connector::Connector, sentinel::Sentinel};
 use crate::{
     commands::{CommandClass, READ_ONLY_SCRIPTS},
@@ -450,6 +454,15 @@ impl Client {
 
     pub fn config(&self) -> &ConnectionConfig {
         &self.config
+    }
+
+    /// Whether `other` is this client or a clone of it: the same
+    /// connection, and so the same database, not merely the same settings.
+    /// A front end whose view can move to another client (another
+    /// database) while a request is on its way checks this before it
+    /// applies the answer to what the view shows now.
+    pub fn same_connection(&self, other: &Client) -> bool {
+        Arc::ptr_eq(&self.config, &other.config)
     }
 
     /// Fails with a [`ReadOnlyError`] on a read-only connection. Every method

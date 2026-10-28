@@ -82,6 +82,18 @@ impl Conn {
         // Errors come back per command, in place of its reply.
         p.ignore_errors().query_async(&mut self.clone()).await
     }
+
+    /// Whether every command must name keys of a single hash slot, as on a
+    /// cluster or one of its nodes, so that bulk operations send one key per
+    /// command. A plain connection to a cluster node (one a user without INFO
+    /// reached as standalone) says no, and the bulk operations switch over on
+    /// their first CROSSSLOT error instead.
+    pub(crate) fn one_slot_per_command(&self) -> bool {
+        match self {
+            Conn::Single(_) | Conn::Sentinel(_) => false,
+            Conn::Cluster(_) | Conn::ClusterNode(_) => true,
+        }
+    }
 }
 
 impl ConnectionLike for Conn {

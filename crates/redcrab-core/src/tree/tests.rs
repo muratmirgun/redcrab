@@ -181,6 +181,116 @@ fn expands_and_collapses_everything() {
 }
 
 #[test]
+fn removes_everything_below_a_folder() {
+    let mut tree = KeyTree::new(Some(b':'));
+    for key in [
+        "user", "user:1", "user:1:a", "user:2:b", "user2:x", "user:", "z",
+    ] {
+        tree.insert(key.as_bytes());
+    }
+    tree.expand_all();
+    let user = tree.find(b"user").unwrap();
+    // `user` itself, `user2:x` (a sibling sharing the first bytes) and `z`
+    // stay; `user:` (an empty last segment) is below the folder.
+    assert_eq!(tree.remove_below(user), 4);
+    assert_eq!(tree.len(), 3);
+    assert_eq!(labels(&mut tree), ["user2/ (1)", "  x", "user", "z"]);
+    for gone in ["user:1", "user:1:a", "user:2:b", "user:"] {
+        assert!(!tree.contains(gone.as_bytes()), "{gone}");
+    }
+    assert!(tree.contains(b"user"));
+    assert!(tree.is_key(user) && !tree.is_folder(user));
+    assert_eq!(tree.remove_below(user), 0, "nothing is left below");
+
+    // Keys inserted again show up again, in order.
+    tree.insert(b"user:2:b");
+    tree.insert(b"user:0");
+    tree.expand_all();
+    assert_eq!(
+        labels(&mut tree),
+        [
+            "user",
+            "user/ (3)",
+            "  2/ (1)",
+            "    b",
+            "  0",
+            "user2/ (1)",
+            "  x",
+            "z"
+        ]
+    );
+}
+
+#[test]
+fn removing_below_a_folder_without_a_key_hides_it() {
+    let mut tree = KeyTree::new(Some(b':'));
+    for key in ["a:b:c", "a:d", "e"] {
+        tree.insert(key.as_bytes());
+    }
+    tree.rows();
+    let a = tree.find(b"a").unwrap();
+    let b = tree.find(b"a:b").unwrap();
+    assert_eq!(tree.remove_below(b), 1);
+    tree.expand_all();
+    assert_eq!(labels(&mut tree), ["a/ (1)", "  d", "e"]);
+    assert_eq!(tree.remove_below(a), 1);
+    assert_eq!(labels(&mut tree), ["e"]);
+    assert_eq!(tree.len(), 1);
+    // A flat tree has no folders: only the key itself is below nothing.
+    let mut flat = KeyTree::new(None);
+    flat.insert(b"a:b");
+    let node = flat.find(b"a:b").unwrap();
+    assert_eq!(flat.remove_below(node), 0);
+    assert!(flat.contains(b"a:b"));
+}
+
+#[test]
+fn opens_and_closes_a_subtree() {
+    let mut tree = KeyTree::new(Some(b':'));
+    for key in ["a:b:c:d", "a:e:f", "g:h"] {
+        tree.insert(key.as_bytes());
+    }
+    let a = tree.find(b"a").unwrap();
+    tree.set_expanded_below(a, true);
+    assert_eq!(
+        labels(&mut tree),
+        [
+            "a/ (2)",
+            "  b/ (1)",
+            "    c/ (1)",
+            "      d",
+            "  e/ (1)",
+            "    f",
+            "g/ (1)"
+        ]
+    );
+    let b = tree.find(b"a:b").unwrap();
+    tree.set_expanded_below(b, false);
+    assert_eq!(
+        labels(&mut tree),
+        ["a/ (2)", "  b/ (1)", "  e/ (1)", "    f", "g/ (1)"]
+    );
+    // Closing below closes the inner folders too, so opening `b` again
+    // shows one level.
+    tree.toggle(b);
+    assert_eq!(
+        labels(&mut tree),
+        [
+            "a/ (2)",
+            "  b/ (1)",
+            "    c/ (1)",
+            "  e/ (1)",
+            "    f",
+            "g/ (1)"
+        ]
+    );
+    assert!(tree.is_under(tree.find(b"a:b:c:d").unwrap(), a));
+    assert!(tree.is_under(a, a));
+    assert!(!tree.is_under(a, b));
+    assert!(!tree.is_under(tree.find(b"g:h").unwrap(), a));
+}
+
+#[test]
 fn reuses_the_row_buffer() {
     let mut tree = KeyTree::new(Some(b':'));
     tree.insert(b"a");
@@ -507,6 +617,10 @@ enum Op {
     Remove(Vec<u8>),
     /// Opens or closes the folder at a key, if there is one.
     Toggle(Vec<u8>),
+    /// Removes every key below the node at a key, as a folder delete does.
+    RemoveBelow(Vec<u8>),
+    /// Opens (or closes) the node at a key and everything below it.
+    ExpandBelow(Vec<u8>, bool),
     /// Flattens as the folders are, so that only some get sorted.
     Flatten,
     /// Flatten with every folder open and compare with the model, which also
@@ -535,6 +649,8 @@ fn op() -> impl Strategy<Value = Op> {
         6 => key().prop_map(Op::Insert),
         3 => key().prop_map(Op::Remove),
         1 => key().prop_map(Op::Toggle),
+        1 => key().prop_map(Op::RemoveBelow),
+        1 => (key(), any::<bool>()).prop_map(|(key, open)| Op::ExpandBelow(key, open)),
         1 => Just(Op::Flatten),
         1 => Just(Op::Check),
     ]
@@ -550,6 +666,33 @@ fn run_model(ops: Vec<Op>, sep: Option<u8>) -> Result<(), TestCaseError> {
             Op::Toggle(key) => {
                 if let Some(node) = tree.find(&key) {
                     tree.toggle(node);
+                }
+            }
+            Op::RemoveBelow(prefix) => {
+                // The keys below a node are those that start with its key
+                // and a separator; a flat tree has nothing below a node.
+                let removed = tree.find(&prefix).map_or(0, |node| tree.remove_below(node));
+                let below: Vec<Vec<u8>> = match sep {
+                    Some(sep) => {
+                        let mut start = prefix.clone();
+                        start.push(sep);
+                        model
+                            .iter()
+                            .filter(|key| key.starts_with(&start))
+                            .cloned()
+                            .collect()
+                    }
+                    None => Vec::new(),
+                };
+                prop_assert_eq!(removed as usize, below.len());
+                for key in &below {
+                    model.remove(key);
+                    prop_assert!(!tree.contains(key));
+                }
+            }
+            Op::ExpandBelow(key, open) => {
+                if let Some(node) = tree.find(&key) {
+                    tree.set_expanded_below(node, open);
                 }
             }
             Op::Flatten => {
@@ -587,6 +730,8 @@ proptest! {
             Op::Insert(key) => Op::Insert(shared_prefix(key)),
             Op::Remove(key) => Op::Remove(shared_prefix(key)),
             Op::Toggle(key) => Op::Toggle(shared_prefix(key)),
+            Op::RemoveBelow(key) => Op::RemoveBelow(shared_prefix(key)),
+            Op::ExpandBelow(key, open) => Op::ExpandBelow(shared_prefix(key), open),
             other => other,
         }), 0..100)
     ) {

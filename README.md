@@ -20,6 +20,11 @@ keyspaces with millions of keys while using a fraction of the memory.
   for those rows alone, in one pipelined round trip.
 - Collections are paged (`HSCAN`, `SSCAN`, `LRANGE`, `ZRANGE`, `XRANGE`), so opening
   a hash with a million fields does not block anything.
+- Deleting a folder, or every key a filter matches, counts the keys first, asks with the
+  exact pattern and count, then `UNLINK`s what `SCAN` returns in pipelined batches, with
+  progress and a Stop button; a stopped delete waits for its last round trip and reports
+  exactly how many keys went. Folder names are matched literally, glob characters and
+  all.
 
 ## TLS
 
@@ -127,6 +132,7 @@ docker run -d --name redcrab-redis -p 127.0.0.1:6379:6379 redis:8-alpine
 cargo run -p redcrab-core --release --example seed        # ~1M keys of every type
 cargo run -p redcrab-core --release --example scan_bench  # core timings and memory per key
 cargo run -p redcrab-core --release --example scan_bench -- --synthetic 1000000  # no server needed
+cargo run -p redcrab-core --release --example delete_bench -- redis://127.0.0.1:6400/15  # writes 500k keys, then deletes them
 cargo run -p redcrab-gui
 ```
 

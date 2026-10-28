@@ -6,9 +6,11 @@ use gpui_kit::{
     Task, Window,
     base::Selectable as _,
     component::{
-        ActiveTheme as _, Sizable as _,
+        ActiveTheme as _, Sizable as _, WindowExt as _,
         button::{Button, ButtonVariants as _},
-        h_flex, h_resizable, resizable_panel, v_flex, v_resizable,
+        h_flex, h_resizable,
+        notification::Notification,
+        resizable_panel, v_flex, v_resizable,
     },
     div,
     prelude::FluentBuilder as _,
@@ -25,6 +27,9 @@ use crate::{
 
 pub enum WorkspaceEvent {
     Disconnect,
+    /// The workspace moved to another database: what it shows of its
+    /// connection changed.
+    ClientChanged,
 }
 
 /// One connected server: key tree, value panel, console and status bar.
@@ -40,6 +45,8 @@ pub struct Workspace {
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
+    /// Connecting to the database the user picked.
+    _switch: Option<Task<()>>,
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
@@ -57,6 +64,20 @@ impl Workspace {
                     this.value
                         .update(cx, |value, cx| value.load(key, window, cx));
                 }
+                KeyEvent::Deleted(key) => {
+                    this.value
+                        .update(cx, |value, cx| value.key_deleted(key, cx));
+                }
+                KeyEvent::FolderDeleted(prefix) => {
+                    let separator = this.client.config().separator_byte();
+                    this.value
+                        .update(cx, |value, cx| value.folder_deleted(prefix, separator, cx));
+                }
+                // The key shown may be one of them; loading it again tells.
+                KeyEvent::KeysDeleted => {
+                    this.value.update(cx, |value, cx| value.reload(window, cx));
+                }
+                KeyEvent::SwitchDb(db) => this.switch_db(*db, window, cx),
             }),
             cx.subscribe_in(&value, window, |this, _, event, _, cx| match event {
                 ValueEvent::Deleted(key) => {
@@ -65,27 +86,7 @@ impl Workspace {
             }),
         ];
 
-        // Server stats for the status bar, refreshed every few seconds.
-        let poll_client = client.clone();
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                let (info, latency) = futures::join!(poll_client.server_info(), poll_client.ping());
-                let alive = this
-                    .update(cx, |this, cx| {
-                        this.online = latency.is_ok();
-                        if let Ok(info) = info {
-                            this.info = Some(info);
-                        }
-                        this.latency = latency.ok();
-                        cx.notify();
-                    })
-                    .is_ok();
-                if !alive {
-                    break;
-                }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-            }
-        });
+        let poll = Self::poll(&client, cx);
 
         let focus = keys.focus_handle(cx);
         window.focus(&focus, cx);
@@ -102,11 +103,76 @@ impl Workspace {
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             _poll: poll,
+            _switch: None,
         }
     }
 
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Server stats for the status bar and database sizes for the key
+    /// list's switcher, now and every few seconds after.
+    fn poll(client: &Client, cx: &mut Context<Self>) -> Task<()> {
+        let client = client.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let (info, latency) = futures::join!(client.server_info(), client.ping());
+                let alive = this
+                    .update(cx, |this, cx| {
+                        this.online = latency.is_ok();
+                        if let Ok(info) = info {
+                            this.info = Some(info);
+                        }
+                        this.latency = latency.ok();
+                        this.keys.update(cx, |keys, cx| keys.refresh_databases(cx));
+                        cx.notify();
+                    })
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
+        })
+    }
+
+    /// Connects to database `db` of the same server, then moves every view
+    /// over to it. Until then everything stays on the current one.
+    fn switch_db(&mut self, db: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let request = self.client.with_db(db);
+        self._switch = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = request.await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(client) => this.set_client(client, window, cx),
+                Err(err) => {
+                    this.keys.update(cx, |keys, cx| keys.switch_failed(cx));
+                    window.push_notification(
+                        Notification::error(format!("{err:#}")).title("Could not switch database"),
+                        cx,
+                    );
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Moves to another connection: the key list rescans, the value panel
+    /// clears, the console gets a new session, and the stats start over.
+    /// The old connection closes once the last request on it is done.
+    fn set_client(&mut self, client: Client, window: &mut Window, cx: &mut Context<Self>) {
+        self.client = client.clone();
+        self.info = None;
+        self.latency = None;
+        self.keys
+            .update(cx, |keys, cx| keys.set_client(client.clone(), window, cx));
+        self.value
+            .update(cx, |value, cx| value.set_client(client.clone(), cx));
+        self.console
+            .update(cx, |console, cx| console.set_client(&client, cx));
+        self._poll = Self::poll(&client, cx);
+        cx.emit(WorkspaceEvent::ClientChanged);
+        cx.notify();
     }
 
     fn refresh(&mut self, _: &Refresh, window: &mut Window, cx: &mut Context<Self>) {

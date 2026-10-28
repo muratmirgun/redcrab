@@ -229,6 +229,51 @@ impl KeyTree {
         true
     }
 
+    /// Marks every key below `node` as gone, but not `node`'s own key: what
+    /// is left of a folder once the keys `prefix + separator + *` are
+    /// deleted. Returns how many keys went. Like [`Self::remove`], the nodes
+    /// stay in the arena; they show again if their keys are inserted again.
+    pub fn remove_below(&mut self, node: NodeId) -> u32 {
+        let n = self.nodes[node];
+        let below = n.keys - n.is_key() as u32;
+        if below == 0 {
+            return 0;
+        }
+        // Every node below ends up without keys, so each is cleared outright
+        // and only `node` and its ancestors are counted down. Nodes without
+        // keys are hidden wherever they were sorted; see `sort_children`.
+        let mut pending = vec![n.folder];
+        while let Some(folder) = pending.pop() {
+            for &child in &self.folders[folder].children {
+                let n = &mut self.nodes[child];
+                if n.keys == 0 {
+                    continue;
+                }
+                n.keys = 0;
+                n.bits &= !IS_KEY;
+                if n.folder != NO_FOLDER {
+                    pending.push(n.folder);
+                }
+            }
+        }
+        self.adjust_counts(node, -(below as i32));
+        below
+    }
+
+    /// Whether `node` is `ancestor` or lies below it.
+    pub fn is_under(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut n = node;
+        loop {
+            if n == ancestor {
+                return true;
+            }
+            if n == ROOT {
+                return false;
+            }
+            n = self.nodes[n].parent();
+        }
+    }
+
     /// The node for a key or folder prefix, if one was ever inserted; it may
     /// no longer hold any key (see [`Self::contains`]).
     pub fn find(&self, key: &[u8]) -> Option<NodeId> {
@@ -305,6 +350,26 @@ impl KeyTree {
 
     pub fn toggle(&mut self, node: NodeId) {
         self.nodes[node].bits ^= EXPANDED;
+    }
+
+    /// Opens or closes `node` and every folder below it.
+    pub fn set_expanded_below(&mut self, node: NodeId, expanded: bool) {
+        self.set_expanded(node, expanded);
+        let mut pending: Vec<FolderId> = Vec::new();
+        pending.extend(Some(self.nodes[node].folder).filter(|&f| f != NO_FOLDER));
+        while let Some(folder) = pending.pop() {
+            for &child in &self.folders[folder].children {
+                let n = &mut self.nodes[child];
+                if expanded {
+                    n.bits |= EXPANDED;
+                } else {
+                    n.bits &= !EXPANDED;
+                }
+                if n.folder != NO_FOLDER {
+                    pending.push(n.folder);
+                }
+            }
+        }
     }
 
     pub fn collapse_all(&mut self) {

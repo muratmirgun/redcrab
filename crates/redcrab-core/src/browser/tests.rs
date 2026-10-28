@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::anyhow;
+use proptest::prelude::*;
 
 use super::*;
 use crate::value::KeyType;
@@ -212,6 +213,48 @@ fn fetches_meta_for_visible_keys_once() {
     assert!(!browser.apply_meta(retry, Ok(vec![Some(meta(KeyType::Set))])));
     assert_eq!(browser.row_view(0).unwrap().meta, None);
     assert!(browser.take_meta_request(0..1).is_some());
+}
+
+/// What a front end does on switching databases: a fresh browser for the
+/// new keyspace. Both first scans used to be generation 1, so an answer or
+/// a row of the old keyspace landed on whatever node of the new tree had
+/// the same id.
+#[test]
+fn a_reset_drops_what_belongs_to_the_old_keyspace() {
+    let mut browser = KeyBrowser::new(b':', Some(10));
+    scan(&mut browser, "", &["session:1", "session:2", "cache"]);
+    let folder = browser.row_view(0).unwrap().id;
+    assert_eq!(folder.kind(), RowKind::Folder);
+    let key = browser.row_view(1).unwrap().id;
+    let request = browser.take_meta_request(0..3).unwrap();
+    assert_eq!(request.keys, [Key::from(&b"cache"[..])]);
+    browser.select(1, false);
+
+    browser.reset(b'/');
+    assert_eq!(browser.separator(), b'/');
+    assert_eq!(browser.status(), &ScanStatus::Idle);
+    assert_eq!(browser.len(), 0);
+    assert_eq!(browser.selected_key(), None);
+    let request_after = browser.begin_scan("");
+    assert_eq!(request_after.options.limit, Some(10), "the limit stays");
+    assert!(request_after.generation > request.generation);
+    scan(&mut browser, "", &["orders/1", "orders/2", "users"]);
+    assert_eq!(labels(&mut browser), ["+orders/ (2)", "users"]);
+
+    // The old keyspace's answer is dropped, and its key is still fetched.
+    assert!(!browser.apply_meta(request, Ok(vec![Some(meta(KeyType::Hash))])));
+    assert!(browser.row_views(0..2).iter().all(|row| row.meta.is_none()));
+    let fresh = browser.take_meta_request(0..2).unwrap();
+    assert_eq!(fresh.keys, [Key::from(&b"users"[..])]);
+    // Rows drawn from it match nothing, though node ids repeat.
+    assert_eq!(browser.row_key(folder), None);
+    assert_eq!(browser.row_key(key), None);
+    assert_eq!(browser.click(key), None);
+    assert!(!browser.set_expanded_below(folder, true));
+    assert_eq!(labels(&mut browser), ["+orders/ (2)", "users"]);
+    // Nor does the old selection come back by name.
+    scan(&mut browser, "", &["session:1", "cache"]);
+    assert_eq!(browser.selected_key(), None);
 }
 
 #[test]
@@ -431,4 +474,292 @@ fn keys_the_user_may_not_see_are_not_asked_for_again() {
     let request = browser.take_meta_request(0..1).unwrap();
     assert!(!browser.apply_meta(request, Ok(vec![None])));
     assert!(browser.take_meta_request(0..1).is_none());
+}
+
+#[test]
+fn folder_patterns_take_the_prefix_literally() {
+    assert_eq!(folder_pattern(b"user", b':'), b"user:*");
+    assert_eq!(folder_pattern(b"", b':'), b":*");
+    assert_eq!(folder_pattern(br"a*b?[c]\d", b':'), br"a\*b\?\[c\]\\d:*");
+    assert_eq!(folder_pattern(b"\xff\x00", b':'), b"\xff\x00:*");
+    // A separator that is itself a glob character is escaped too.
+    assert_eq!(folder_pattern(b"a", b'*'), br"a\**");
+    assert_eq!(folder_pattern(b"a", b'\\'), br"a\\*");
+}
+
+#[test]
+fn row_keys_follow_the_drawn_row() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["user", "user:1", "user:2:x", "z"]);
+    let len = browser.len();
+    let drawn = browser.row_views(0..len);
+    let row = |name: &str, kind: RowKind| {
+        drawn
+            .iter()
+            .find(|r| r.name == name && r.kind == kind)
+            .unwrap()
+            .id
+    };
+    let folder = row("user", RowKind::Folder);
+    let key = row("user", RowKind::Key);
+    let z = row("z", RowKind::Key);
+    assert_eq!(browser.row_key(folder).as_deref(), Some(&b"user"[..]));
+    assert_eq!(browser.row_key(key).as_deref(), Some(&b"user"[..]));
+    assert_eq!(browser.row_key(z).as_deref(), Some(&b"z"[..]));
+
+    // Gone rows and rows of an earlier scan stand for nothing.
+    browser.remove_folder(b"user");
+    assert_eq!(browser.row_key(folder), None);
+    assert_eq!(browser.row_key(key).as_deref(), Some(&b"user"[..]));
+    scan(&mut browser, "", &["z"]);
+    assert_eq!(browser.row_key(z), None);
+}
+
+#[test]
+fn expands_and_collapses_below_a_row() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a:b:c:d", "a:e", "f:g"]);
+    let folder = browser.row_views(0..1)[0].id;
+    assert!(browser.set_expanded_below(folder, true));
+    assert_eq!(
+        labels(&mut browser),
+        [
+            "-a/ (2)",
+            "  -b/ (1)",
+            "    -c/ (1)",
+            "      d",
+            "  e",
+            "+f/ (1)"
+        ]
+    );
+    assert!(browser.set_expanded_below(folder, false));
+    assert_eq!(labels(&mut browser), ["+a/ (2)", "+f/ (1)"]);
+    // Key rows have nothing below them, and rows of an earlier scan are
+    // ignored.
+    scan(&mut browser, "", &["k"]);
+    let key = browser.row_views(0..1)[0].id;
+    assert!(!browser.set_expanded_below(key, true));
+    assert!(!browser.set_expanded_below(folder, true));
+}
+
+#[test]
+fn removes_a_deleted_folder() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(
+        &mut browser,
+        "",
+        &["user", "user:1", "user:2:a", "user:2:b", "user2:x", "z"],
+    );
+    assert_eq!(browser.status_text(), "6 keys · 12 ms");
+    // Open `user` and `user:2`, select `user:2:b`, and fetch the types of
+    // what is on screen.
+    browser.select(1, true);
+    browser.select(2, true);
+    let len = browser.len();
+    let b = browser
+        .row_views(0..len)
+        .iter()
+        .position(|r| r.name == "b")
+        .unwrap();
+    assert_eq!(browser.select(b, false).as_deref(), Some(&b"user:2:b"[..]));
+    let request = browser.take_meta_request(0..len).unwrap();
+    let n = request.keys.len();
+    browser.apply_meta(request, Ok(vec![Some(meta(KeyType::String)); n]));
+
+    assert_eq!(browser.remove_folder(b"user"), 3);
+    assert_eq!(labels(&mut browser), ["+user2/ (1)", "user", "z"]);
+    assert_eq!(browser.selected_key(), None, "the selected key is gone");
+    assert_eq!(browser.key_count(), 3);
+    assert_eq!(browser.status_text(), "3 keys · 12 ms");
+    // The cache keeps the keys that are left, and only those.
+    {
+        let tree = browser.tree();
+        assert!(browser.meta.keys().all(|&node| tree.is_key(node)));
+    }
+    assert!(browser.take_meta_request(0..3).is_none());
+
+    // Nothing to remove: unknown folders, keys without anything below.
+    assert_eq!(browser.remove_folder(b"user"), 0);
+    assert_eq!(browser.remove_folder(b"nope"), 0);
+    assert_eq!(browser.remove_folder(b"z"), 0);
+    assert_eq!(browser.key_count(), 3);
+}
+
+#[test]
+fn removing_a_folder_keeps_a_selection_outside_it() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a:1", "a:2", "b:1", "c"]);
+    // Rows: a/, b/, c.
+    assert_eq!(browser.select(2, false).as_deref(), Some(&b"c"[..]));
+    browser.remove_folder(b"a");
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"c"[..]));
+    assert_eq!(labels(&mut browser), ["+b/ (1)", "c *"]);
+    // A selected folder that empties is no longer selected.
+    browser.select(0, false);
+    browser.remove_folder(b"b");
+    assert_eq!(browser.selected_index(), None);
+    assert_eq!(labels(&mut browser), ["c"]);
+}
+
+#[test]
+fn removing_a_folder_drops_a_pending_reselection_inside_it() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a:1", "b"]);
+    browser.select(0, true);
+    browser.select(1, false);
+    assert_eq!(browser.selected_key().as_deref(), Some(&b"a:1"[..]));
+    // A rescan carries the selection by key until the new tree has it.
+    let request = browser.begin_scan("");
+    browser.remove_folder(b"a");
+    request.tree.lock().unwrap().insert(b"a:1");
+    browser.on_scan_event(request.generation, ScanEvent::Progress { keys: 1 });
+    assert_eq!(browser.selected_key(), None);
+}
+
+/// Redis's glob matching (`stringmatchlen` in util.c), byte-wise, for
+/// checking patterns without a server: escapes, `?`, `*`, and classes with
+/// `^`, ranges and escapes.
+fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
+    let (mut p, mut s) = (pattern, string);
+    while let Some(&c) = p.first() {
+        match c {
+            b'*' => {
+                while p.first() == Some(&b'*') {
+                    p = &p[1..];
+                }
+                return p.is_empty() || (0..=s.len()).any(|i| glob_match(p, &s[i..]));
+            }
+            b'?' => {
+                if s.is_empty() {
+                    return false;
+                }
+                s = &s[1..];
+                p = &p[1..];
+            }
+            b'[' => {
+                let Some(&b) = s.first() else { return false };
+                let mut i = 1;
+                let not = p.get(i) == Some(&b'^');
+                if not {
+                    i += 1;
+                }
+                let mut hit = false;
+                loop {
+                    match p.get(i) {
+                        // An unterminated class ends at the pattern's end.
+                        None => {
+                            i -= 1;
+                            break;
+                        }
+                        Some(b']') => break,
+                        Some(b'\\') if i + 1 < p.len() => {
+                            hit |= p[i + 1] == b;
+                            i += 2;
+                        }
+                        Some(&lo) if p.get(i + 1) == Some(&b'-') && i + 2 < p.len() => {
+                            let hi = p[i + 2];
+                            let (lo, hi) = if lo > hi { (hi, lo) } else { (lo, hi) };
+                            hit |= (lo..=hi).contains(&b);
+                            i += 3;
+                        }
+                        Some(&x) => {
+                            hit |= x == b;
+                            i += 1;
+                        }
+                    }
+                }
+                if hit == not {
+                    return false;
+                }
+                p = &p[(i + 1).min(p.len())..];
+                s = &s[1..];
+            }
+            b'\\' if p.len() >= 2 => {
+                if s.first() != Some(&p[1]) {
+                    return false;
+                }
+                p = &p[2..];
+                s = &s[1..];
+            }
+            c => {
+                if s.first() != Some(&c) {
+                    return false;
+                }
+                p = &p[1..];
+                s = &s[1..];
+            }
+        }
+    }
+    s.is_empty()
+}
+
+#[test]
+fn the_test_matcher_matches_like_redis() {
+    assert!(glob_match(b"user:*", b"user:1"));
+    assert!(glob_match(b"user:*", b"user:"));
+    assert!(!glob_match(b"user:*", b"user"));
+    assert!(!glob_match(b"user:*", b"user2:1"));
+    assert!(glob_match(b"h?llo", b"hello"));
+    assert!(glob_match(b"h[ae]llo", b"hallo"));
+    assert!(!glob_match(b"h[^e]llo", b"hello"));
+    assert!(glob_match(b"h[a-b]llo", b"hbllo"));
+    assert!(glob_match(br"a\*b", b"a*b"));
+    assert!(!glob_match(br"a\*b", b"axb"));
+    assert!(glob_match(b"a*", b"a*b"));
+    assert!(!glob_match(b"a", b"ab"));
+}
+
+/// Bytes that make prefixes interesting: glob characters, the separator,
+/// a backslash, and bytes that are not UTF-8.
+fn tricky_bytes(len: std::ops::Range<usize>) -> impl Strategy<Value = Vec<u8>> {
+    proptest::collection::vec(
+        prop_oneof![
+            3 => Just(b'a'),
+            1 => Just(b'b'),
+            2 => Just(b':'),
+            1 => Just(b'*'),
+            1 => Just(b'?'),
+            1 => Just(b'['),
+            1 => Just(b']'),
+            1 => Just(b'^'),
+            1 => Just(b'-'),
+            1 => Just(b'\\'),
+            1 => Just(0xff),
+            1 => Just(0x00),
+        ],
+        len,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2048))]
+
+    /// The pattern of a folder matches exactly the keys it holds: those
+    /// that start with the prefix and the separator.
+    #[test]
+    fn folder_patterns_match_exactly_the_folder(
+        prefix in tricky_bytes(0..8),
+        rest in tricky_bytes(0..12),
+        separator in prop_oneof![Just(b':'), Just(b'*'), Just(b'\\'), Just(b'/')],
+        under in any::<bool>(),
+    ) {
+        // Half of the keys are built inside the folder, so both outcomes
+        // come up often.
+        let mut start = prefix.clone();
+        start.push(separator);
+        let key = if under { [start.as_slice(), &rest].concat() } else { rest };
+        let pattern = folder_pattern(&prefix, separator);
+        prop_assert_eq!(glob_match(&pattern, &key), key.starts_with(&start));
+    }
+
+    /// An escaped string matches itself and nothing else.
+    #[test]
+    fn escaped_strings_match_only_themselves(
+        literal in tricky_bytes(0..10),
+        other in tricky_bytes(0..10),
+    ) {
+        let pattern = escape_glob(&literal);
+        prop_assert!(glob_match(&pattern, &literal));
+        prop_assert_eq!(glob_match(&pattern, &other), other == literal);
+    }
 }

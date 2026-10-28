@@ -63,6 +63,14 @@ impl Console {
         }
     }
 
+    /// Moves to another connection (another database of the server) with a
+    /// new session; a command still running on the old one is abandoned.
+    pub fn set_client(&mut self, client: &Client, cx: &mut Context<Self>) {
+        self.session.cancel();
+        self.session = client.console();
+        cx.notify();
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }

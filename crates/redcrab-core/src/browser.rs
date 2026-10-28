@@ -67,6 +67,20 @@ pub fn escape_glob(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The MATCH pattern for every key in the folder `prefix` of a tree split
+/// on `separator`: the prefix and the separator taken literally, then
+/// anything. The key `prefix` itself, which a folder row can share its
+/// name with, does not match, and neither does a sibling that merely starts
+/// with the same bytes (`user2:1` for the folder `user`).
+pub fn folder_pattern(prefix: &[u8], separator: u8) -> Vec<u8> {
+    let mut literal = Vec::with_capacity(prefix.len() + 1);
+    literal.extend_from_slice(prefix);
+    literal.push(separator);
+    let mut pattern = escape_glob(&literal);
+    pattern.push(b'*');
+    pattern
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ScanStatus {
     #[default]
@@ -110,6 +124,13 @@ pub struct RowId {
     generation: u64,
     node: NodeId,
     kind: RowKind,
+}
+
+impl RowId {
+    /// Whether the row was a key or a folder.
+    pub fn kind(&self) -> RowKind {
+        self.kind
+    }
 }
 
 /// What a row shows.
@@ -183,8 +204,26 @@ impl KeyBrowser {
         }
     }
 
+    /// Starts over for another keyspace (another database of the server):
+    /// an empty tree split on `separator`, nothing selected, nothing
+    /// cached, nothing to select again. The generation goes on counting
+    /// rather than starting again, so that an answer to a request of the
+    /// old keyspace, or a row drawn from it (a context menu left open),
+    /// matches nothing here even though node ids are reused.
+    pub fn reset(&mut self, separator: u8) {
+        *self = Self {
+            generation: self.generation + 1,
+            ..Self::new(separator, self.limit)
+        };
+    }
+
     fn tree(&self) -> MutexGuard<'_, KeyTree> {
         self.tree.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The byte that splits keys into folders.
+    pub fn separator(&self) -> u8 {
+        self.separator
     }
 
     /// Starts over with an empty tree for `query` (see [`pattern_for`]). The
@@ -460,20 +499,94 @@ impl KeyBrowser {
     /// the front end to show. A row of an earlier scan, or one that has gone
     /// since (a deleted key), is ignored.
     pub fn click(&mut self, id: RowId) -> Option<Key> {
+        let node = self.live(id)?;
+        self.select_node(node, id.kind, true)
+    }
+
+    /// The node of a row as it was drawn, if the row is still there.
+    fn live(&self, id: RowId) -> Option<NodeId> {
         if id.generation != self.generation {
             return None;
         }
-        let live = {
-            let tree = self.tree();
-            match id.kind {
-                RowKind::Key => tree.is_key(id.node),
-                RowKind::Folder => tree.is_folder(id.node),
-            }
+        let tree = self.tree();
+        let live = match id.kind {
+            RowKind::Key => tree.is_key(id.node),
+            RowKind::Folder => tree.is_folder(id.node),
         };
-        if !live {
-            return None;
+        live.then_some(id.node)
+    }
+
+    /// What a row as it was drawn stands for, for acting on it from a
+    /// context menu: the key of a key row, the prefix (without a trailing
+    /// separator) of a folder row. `None` if the row has gone since.
+    pub fn row_key(&self, id: RowId) -> Option<Key> {
+        let node = self.live(id)?;
+        Some(self.tree().key(node))
+    }
+
+    /// Opens or closes a folder row and every folder below it. Returns
+    /// whether the row was still there.
+    pub fn set_expanded_below(&mut self, id: RowId, expanded: bool) -> bool {
+        let Some(node) = self.live(id).filter(|_| id.kind == RowKind::Folder) else {
+            return false;
+        };
+        self.tree().set_expanded_below(node, expanded);
+        self.rows_dirty = true;
+        true
+    }
+
+    /// Drops every key in the folder `prefix` from the tree, as deleting
+    /// [`folder_pattern`]`(prefix)` does on the server: the key `prefix`
+    /// itself and siblings that share its first bytes stay. Returns how many
+    /// keys went.
+    pub fn remove_folder(&mut self, prefix: &[u8]) -> usize {
+        // A selection carried over a rescan does not come back from inside.
+        let mut start = prefix.to_vec();
+        start.push(self.separator);
+        if self
+            .reselect
+            .as_ref()
+            .is_some_and(|(key, _)| key.starts_with(&start))
+        {
+            self.reselect = None;
         }
-        self.select_node(id.node, id.kind, true)
+        let (removed, folder) = {
+            let mut tree = self.tree();
+            let Some(folder) = tree.find(prefix) else {
+                return 0;
+            };
+            (tree.remove_below(folder), folder)
+        };
+        if removed == 0 {
+            return 0;
+        }
+        {
+            let tree = self.tree.lock().unwrap_or_else(|e| e.into_inner());
+            let below = |node: NodeId| node != folder && tree.is_under(node, folder);
+            self.meta.retain(|&node, _| !below(node));
+            self.meta_pending.retain(|&node| !below(node));
+            if let Some((node, kind)) = self.selected {
+                let gone = match kind {
+                    RowKind::Key => !tree.is_key(node),
+                    RowKind::Folder => !tree.is_folder(node),
+                };
+                if gone {
+                    self.selected = None;
+                }
+            }
+        }
+        self.recount();
+        self.rows_dirty = true;
+        removed as usize
+    }
+
+    /// Keeps the key count of a finished scan in step with keys removed
+    /// since.
+    fn recount(&mut self) {
+        let len = self.tree().len();
+        if let ScanStatus::Done { keys, .. } = &mut self.status {
+            *keys = len;
+        }
     }
 
     fn select_node(&mut self, node: NodeId, kind: RowKind, toggle: bool) -> Option<Key> {
@@ -575,6 +688,7 @@ impl KeyBrowser {
                 self.selected = None;
             }
         }
+        self.recount();
         self.rows_dirty = true;
     }
 }

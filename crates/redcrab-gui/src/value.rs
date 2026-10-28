@@ -122,6 +122,47 @@ impl ValuePanel {
         }
     }
 
+    /// Moves to another connection (another database of the server); what
+    /// the panel showed belonged to the old one.
+    pub fn set_client(&mut self, client: Client, cx: &mut Context<Self>) {
+        self.client = client;
+        self.clear(cx);
+    }
+
+    /// Clears the panel if it shows `key`, which was deleted elsewhere.
+    pub fn key_deleted(&mut self, key: &[u8], cx: &mut Context<Self>) {
+        if self.key.as_deref() == Some(key) {
+            self.clear(cx);
+        }
+    }
+
+    /// Clears the panel if it shows a key of the folder `prefix`, whose keys
+    /// were all deleted.
+    pub fn folder_deleted(&mut self, prefix: &[u8], separator: u8, cx: &mut Context<Self>) {
+        let inside = self.key.as_ref().is_some_and(|key| {
+            key.strip_prefix(prefix)
+                .is_some_and(|rest| rest.first() == Some(&separator))
+        });
+        if inside {
+            self.clear(cx);
+        }
+    }
+
+    /// Shows no key, dropping any load still on its way.
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.key = None;
+        self.loaded = None;
+        self.text = None;
+        self.selected_row = None;
+        self.error = None;
+        self.confirm_delete = false;
+        self.loading = false;
+        self.loading_more = false;
+        self._load = None;
+        self._more = None;
+        cx.notify();
+    }
+
     fn show(&mut self, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) {
         self.text = loaded
             .text(!self.read_only())
@@ -256,7 +297,8 @@ impl ValuePanel {
             return;
         }
         self.confirm_delete = false;
-        let request = self.client.delete(vec![key.clone()]);
+        let client = self.client.clone();
+        let request = client.delete(vec![key.clone()]);
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
@@ -269,6 +311,11 @@ impl ValuePanel {
                             )),
                             cx,
                         );
+                        // The panel may have moved to another database
+                        // meanwhile, where a key of that name stays.
+                        if !client.same_connection(&this.client) {
+                            return;
+                        }
                         // Only if the deleted key is still the one shown.
                         if this.key.as_ref() == Some(&key) {
                             this.key = None;

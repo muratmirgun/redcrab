@@ -74,6 +74,8 @@ impl RedcrabApp {
                     let config = workspace.read(cx).client().config().without_secrets();
                     this.show_connect(config, window, cx);
                 }
+                // The title bar names the database.
+                WorkspaceEvent::ClientChanged => cx.notify(),
             },
         ));
         self.screen = Screen::Workspace(workspace);

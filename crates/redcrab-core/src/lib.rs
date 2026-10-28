@@ -5,11 +5,13 @@
 //! them from any executor (GPUI's, a TUI loop, or tokio itself).
 
 pub mod browser;
+pub mod bulk;
 mod client;
 pub mod commands;
 mod config;
 pub mod form;
 pub mod format;
+pub mod progress;
 mod runtime;
 pub mod ssh;
 pub mod store;
@@ -18,8 +20,8 @@ mod value;
 pub mod viewer;
 
 pub use client::{
-    Client, ConnectOptions, ConsoleSession, Key, ReadOnlyError, ScanEvent, ScanOptions, ServerInfo,
-    key_slot,
+    COUNT_EXACT_MAX, Client, ConnectOptions, ConsoleSession, DELETE_BATCH, DbInfo, DeleteProgress,
+    DeleteStats, Key, ReadOnlyError, ScanEvent, ScanOptions, ScanProgress, ServerInfo, key_slot,
 };
 pub use config::{
     ConfigField, ConnectionConfig, Environment, HostKeyPolicy, InvalidConfig, SshAuth, SshConfig,
