@@ -450,11 +450,14 @@ impl KeyBrowser {
         }
     }
 
-    /// The context menu of a row: copy, delete (greyed out unless
-    /// `can_delete`), and for folders, open or close everything below.
+    /// The context menu of a row: copy, delete, and for folders, open or
+    /// close everything below. A read-only connection gets no delete, as
+    /// everywhere else; while the list moves to another database it is
+    /// greyed out (`can_delete`).
     fn row_menu(
         view: WeakEntity<Self>,
         id: RowId,
+        writable: bool,
         can_delete: bool,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         move |menu, _, _| {
@@ -471,18 +474,24 @@ impl KeyBrowser {
             match id.kind() {
                 RowKind::Key => menu
                     .item(item("Copy name", Icon::new(IconName::Copy), Self::copy_row))
-                    .separator()
-                    .item(item("Delete…", trash(), Self::confirm_delete_row).disabled(!can_delete)),
+                    .when(writable, |menu| {
+                        menu.separator().item(
+                            item("Delete…", trash(), Self::confirm_delete_row)
+                                .disabled(!can_delete),
+                        )
+                    }),
                 RowKind::Folder => menu
                     .item(item(
                         "Copy prefix",
                         Icon::new(IconName::Copy),
                         Self::copy_row,
                     ))
-                    .item(
-                        item("Delete folder…", trash(), Self::delete_folder_row)
-                            .disabled(!can_delete),
-                    )
+                    .when(writable, |menu| {
+                        menu.item(
+                            item("Delete folder…", trash(), Self::delete_folder_row)
+                                .disabled(!can_delete),
+                        )
+                    })
                     .separator()
                     .item(item(
                         "Expand all below",
@@ -631,13 +640,13 @@ impl KeyBrowser {
         self.request_meta(range.clone(), cx);
         let rows = self.model.row_views(range.clone());
         let view = cx.weak_entity();
-        let can_delete = self.can_delete();
+        let (writable, can_delete) = (!self.read_only(), self.can_delete());
         let theme = cx.theme();
         range
             .zip(rows)
             .map(|(ix, row)| {
                 let id = row.id;
-                let menu = Self::row_menu(view.clone(), id, can_delete);
+                let menu = Self::row_menu(view.clone(), id, writable, can_delete);
                 let base = h_flex()
                     .id(ix)
                     .h(px(ROW_HEIGHT))
@@ -815,6 +824,9 @@ impl Render for KeyBrowser {
                                 .ghost()
                                 .small()
                                 .icon(IconName::Plus)
+                                // Not while the list moves to another
+                                // database (see `new_key`).
+                                .disabled(self.switching.is_some())
                                 .tooltip("New key (⇧⌘N)")
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.new_key(window, cx)),
