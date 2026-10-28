@@ -32,6 +32,8 @@ use crate::{
 };
 
 const ROW_HEIGHT: f32 = 26.;
+/// The least room a header gives the key's name before its controls wrap.
+const MIN_NAME_WIDTH: f32 = 80.;
 /// Width of a narrow first column (list index, score, stream ID).
 const NARROW_COLUMN: f32 = 150.;
 
@@ -1067,10 +1069,17 @@ impl ValuePanel {
         let ttl = loaded.map(Loaded::ttl_text);
         let saveable = self.text.as_ref().is_some_and(|t| t.dirty);
 
+        // Buttons do not shrink: in a narrow panel (the window at its
+        // minimum width, or a wide key list) the controls wrap onto a
+        // second line rather than run past the edge, and the key name
+        // keeps some room.
         h_flex()
-            .gap_2()
+            .flex_wrap()
+            .gap_x_2()
+            .gap_y_1()
             .px_3()
-            .h(px(44.))
+            .py(px(7.))
+            .min_h(px(44.))
             .flex_none()
             .border_b_1()
             .border_color(theme.border)
@@ -1080,7 +1089,7 @@ impl ValuePanel {
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(MIN_NAME_WIDTH))
                     .truncate()
                     .font_family(theme.mono_font_family.clone())
                     .text_sm()
@@ -1389,9 +1398,12 @@ impl ValuePanel {
             .border_color(theme.border)
             .child(
                 h_flex()
-                    .h(px(36.))
+                    .flex_wrap()
+                    .min_h(px(36.))
+                    .py_1()
                     .px_3()
-                    .gap_2()
+                    .gap_x_2()
+                    .gap_y_1()
                     .flex_none()
                     .border_b_1()
                     .border_color(theme.border)
