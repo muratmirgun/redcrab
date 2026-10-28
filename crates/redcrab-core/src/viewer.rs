@@ -55,7 +55,14 @@ pub struct Loaded {
     /// `MEMORY USAGE`, if the server allows it.
     pub memory: Option<u64>,
     id: u64,
+    /// The server ([`Client::epoch`]) a [`Cursor::Scan`] in `next` came
+    /// from; `None` when that is not known (it changed while the page was
+    /// loaded).
+    epoch: Option<u64>,
 }
+
+/// Why [`Loaded::load_more`] cannot go on with an HSCAN or SSCAN cursor.
+const SERVER_CHANGED: &str = "the server changed since this value was loaded (a Sentinel failover), so the next page cannot be found where the last one ended; reload the value";
 
 /// Reads the type and TTL of `key` fresh (the key list's may be stale),
 /// then its first page and its memory usage at the same time.
@@ -67,12 +74,17 @@ pub fn load(client: &Client, key: Key) -> impl Future<Output = Result<Loaded>> +
             .await?
             .pop()
             .context("empty reply")?;
+        let epoch = client.epoch();
         let (page, memory) = futures::join!(
             client.load(key.clone(), meta.ty.clone(), Cursor::Start, PAGE),
             client.memory_usage(key.clone()),
         );
         let page = page?;
-        Ok(Loaded::new(key, meta, page, memory.ok().flatten()))
+        let mut loaded = Loaded::new(key, meta, page, memory.ok().flatten());
+        // A cursor from a page that may have come from either server
+        // cannot be followed on either.
+        loaded.epoch = (client.epoch() == epoch).then_some(epoch);
+        Ok(loaded)
     }
 }
 
@@ -121,6 +133,7 @@ impl Loaded {
             next: page.next,
             memory,
             id: LOADS.fetch_add(1, Ordering::Relaxed),
+            epoch: Some(0),
         }
     }
 
@@ -129,19 +142,32 @@ impl Loaded {
     }
 
     /// Fetches the next page, or `None` once everything is loaded.
+    ///
+    /// A hash or set pages with an HSCAN / SSCAN cursor, which only means
+    /// something on the server that handed it out. After a Sentinel
+    /// failover (before or during the request) the page fails with an
+    /// error asking to reload, instead of continuing at an arbitrary point
+    /// of the new master's table.
     pub fn load_more(
         &self,
         client: &Client,
     ) -> Option<impl Future<Output = Result<MorePage>> + Send + 'static> {
         let from = self.next.clone()?;
-        let request = client.load(self.key.clone(), self.meta.ty.clone(), from.clone(), PAGE);
-        let load = self.id;
+        let client = client.clone();
+        let (key, ty, load) = (self.key.clone(), self.meta.ty.clone(), self.id);
+        // Lists, sorted sets and streams page by index or ID, which hold on
+        // any server with the same data.
+        let epoch = matches!(from, Cursor::Scan(_)).then_some(self.epoch);
         Some(async move {
-            Ok(MorePage {
-                load,
-                from,
-                page: request.await?,
-            })
+            let current = || Some(client.epoch());
+            if epoch.is_some_and(|epoch| epoch != current()) {
+                anyhow::bail!(SERVER_CHANGED);
+            }
+            let page = client.load(key, ty, from.clone(), PAGE).await?;
+            if epoch.is_some_and(|epoch| epoch != current()) {
+                anyhow::bail!(SERVER_CHANGED);
+            }
+            Ok(MorePage { load, from, page })
         })
     }
 

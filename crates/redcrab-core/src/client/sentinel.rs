@@ -140,6 +140,18 @@ impl Sentinel {
         format_address(&current.address.0, current.address.1)
     }
 
+    /// Bumped each time requests move to another master. A SCAN cursor
+    /// only means something on the server that handed it out, so a walk
+    /// that sees this change starts over (see
+    /// [`NodeCursor`](super::conn::NodeCursor)).
+    pub(crate) fn generation(&self) -> u64 {
+        self.inner
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
     /// The master's address as the sentinels say it now, for connections of
     /// their own (the console's).
     pub(crate) async fn resolve(&self) -> Result<(String, u16)> {

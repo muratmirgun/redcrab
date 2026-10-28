@@ -541,6 +541,12 @@ impl Client {
         Arc::ptr_eq(&self.config, &other.config)
     }
 
+    /// See [`Conn::epoch`]: which server SCAN cursors from this client
+    /// belong to.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.conn.epoch()
+    }
+
     /// Fails with a [`ReadOnlyError`] on a read-only connection. Every method
     /// that can change the server calls this first, so the guarantee holds
     /// for every front end, not just for the buttons a UI hides.

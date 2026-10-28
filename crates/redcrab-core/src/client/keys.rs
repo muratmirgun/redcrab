@@ -10,6 +10,7 @@ use redis::{RedisError, ServerError, Value, cmd};
 use super::{
     Client, EditError, Key, ScanEvent, ScanOptions,
     cluster::{key_slot, unowned_error},
+    conn::{CursorStep, NodeCursor},
     edit::check_ttl,
 };
 use crate::{
@@ -46,10 +47,10 @@ impl Client {
             let (nodes, unowned) = conn.walk_nodes().await;
             let mut left = limit.unwrap_or(usize::MAX);
             for mut con in nodes {
-                let mut cursor = 0u64;
+                let mut cursor = NodeCursor::start(&con);
                 while left > 0 {
                     let mut scan = cmd("SCAN");
-                    scan.arg(cursor)
+                    scan.arg(cursor.at())
                         .arg("MATCH")
                         .arg(&options.pattern)
                         .arg("COUNT")
@@ -59,15 +60,26 @@ impl Client {
                     }
                     match scan.query_async::<(u64, Vec<Vec<u8>>)>(&mut con).await {
                         Ok((next, mut keys)) => {
+                            let step = match cursor.advance(next, con.epoch()) {
+                                Ok(step) => step,
+                                Err(err) => {
+                                    let _ = tx.send(Err(err)).await;
+                                    return;
+                                }
+                            };
+                            // Another master answered: its page may be
+                            // from anywhere; the walk starts over there.
+                            if step == CursorStep::Restarted {
+                                continue;
+                            }
                             keys.truncate(left);
                             left -= keys.len();
                             if !keys.is_empty() && tx.send(Ok(map(keys))).await.is_err() {
                                 return;
                             }
-                            if next == 0 {
+                            if step == CursorStep::Done {
                                 break;
                             }
-                            cursor = next;
                         }
                         Err(err) => {
                             let _ = tx.send(Err(err.into())).await;

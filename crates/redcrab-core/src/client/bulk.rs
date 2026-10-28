@@ -10,7 +10,11 @@ use anyhow::{Result, anyhow};
 use hashbrown::HashTable;
 use redis::{ServerError, ServerErrorKind, Value, cmd, pipe};
 
-use super::{Client, Conn, ReadOnlyError, cluster::unowned_error};
+use super::{
+    Client, Conn, ReadOnlyError,
+    cluster::unowned_error,
+    conn::{CursorStep, NodeCursor},
+};
 use crate::{
     format,
     progress::{self, Reporter, Updates},
@@ -104,13 +108,16 @@ impl Client {
             let mut distinct = Distinct::default();
             let (nodes, unowned) = conn.walk_nodes().await;
             for mut con in nodes {
-                let mut cursor = 0u64;
+                let mut cursor = NodeCursor::start(&con);
+                // What the nodes before this one counted, to go back to if
+                // the walk of this one starts over.
+                let before = distinct.count;
                 loop {
                     if reporter.is_abandoned() || reporter.stop_requested() {
                         return;
                     }
                     let mut scan = cmd("SCAN");
-                    scan.arg(cursor)
+                    scan.arg(cursor.at())
                         .arg("MATCH")
                         .arg(&pattern)
                         .arg("COUNT")
@@ -126,16 +133,31 @@ impl Client {
                             return;
                         }
                     };
-                    for key in &keys {
-                        distinct.insert(key);
+                    let step = match cursor.advance(next, con.epoch()) {
+                        Ok(step) => step,
+                        Err(err) => {
+                            reporter.update(ScanProgress::Failed {
+                                keys: distinct.count,
+                                error: format!("{err:#}"),
+                            });
+                            return;
+                        }
+                    };
+                    if step == CursorStep::Restarted {
+                        // Counted on another server; the new one is
+                        // counted from the start.
+                        distinct.restart(before);
+                    } else {
+                        for key in &keys {
+                            distinct.insert(key);
+                        }
                     }
                     reporter.update(ScanProgress::Counting {
                         keys: distinct.count,
                     });
-                    if next == 0 {
+                    if step == CursorStep::Done {
                         break;
                     }
-                    cursor = next;
                 }
                 // A key lives on one node only, so nothing seen on this one
                 // comes up again on the next.
@@ -268,6 +290,13 @@ impl Distinct {
     fn forget(&mut self) {
         self.hashes.clear();
     }
+
+    /// Forgets the keys of the node being walked, whose walk starts over,
+    /// and goes back to `count`, what the nodes before it counted.
+    fn restart(&mut self, count: u64) {
+        self.hashes.clear();
+        self.count = count;
+    }
 }
 
 /// How a walk over one node ended, short of an error.
@@ -290,7 +319,7 @@ async fn delete_on_node(
     reporter: &Reporter<DeleteProgress>,
 ) -> Result<Walked> {
     let mut one_slot = con.one_slot_per_command();
-    let mut cursor = 0u64;
+    let mut cursor = NodeCursor::start(&con);
     let mut scanning = true;
     // The keys of the last page, deleted with the request for the next.
     let mut keys: Vec<Vec<u8>> = Vec::new();
@@ -310,7 +339,7 @@ async fn delete_on_node(
         let unlinks = add_unlinks(&mut p, &keys, one_slot);
         if scanning {
             p.cmd("SCAN")
-                .arg(cursor)
+                .arg(cursor.at())
                 .arg("MATCH")
                 .arg(pattern)
                 .arg("COUNT")
@@ -345,9 +374,13 @@ async fn delete_on_node(
         match page.transpose()? {
             Some((next, page)) => {
                 stats.scanned += page.len() as u64;
+                // Keys the server just said match: deleted next round trip
+                // even when the walk starts over, as they match all the
+                // same.
                 keys = page;
-                cursor = next;
-                scanning = next != 0;
+                // After a move to another master the walk starts over
+                // there, or it would skip keys and still end "Done".
+                scanning = cursor.advance(next, con.epoch())? != CursorStep::Done;
             }
             None => keys.clear(),
         }

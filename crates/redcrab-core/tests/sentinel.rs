@@ -14,13 +14,19 @@
 mod common;
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+    },
     thread::sleep,
     time::{Duration, Instant},
 };
 
 use common::*;
-use redcrab_core::{Client, ConnectionConfig, Cursor, Key, KeyType, RawValue, Topology, ValueData};
+use redcrab_core::{
+    Client, ConnectionConfig, Cursor, DeleteProgress, Key, KeyType, RawValue, ScanEvent,
+    ScanOptions, ScanProgress, Topology, ValueData, viewer,
+};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{TcpListener, TcpStream, tcp::OwnedReadHalf},
@@ -364,11 +370,13 @@ fn server_runtime() -> Runtime {
 
 /// A sentinel of the test's own, so that what it is sent can be checked
 /// without touching the shared one: it names 127.0.0.1:`master` for any
-/// name, wants `AUTH user password` first when `auth` says so, and records
-/// every AUTH it gets.
+/// name (until [`Self::master`] is changed), wants `AUTH user password`
+/// first when `auth` says so, and records every AUTH it gets.
 struct FakeSentinel {
     port: u16,
     auths: Arc<Mutex<Vec<Vec<String>>>>,
+    /// The port it names as the master's.
+    master: Arc<AtomicU16>,
     runtime: Option<Runtime>,
 }
 
@@ -378,19 +386,23 @@ impl FakeSentinel {
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
         let port = listener.local_addr().unwrap().port();
         let auths = Arc::new(Mutex::new(Vec::new()));
+        let master = Arc::new(AtomicU16::new(master));
         let required: Option<Vec<String>> =
             auth.map(|(user, password)| vec![user.into(), password.into()]);
         runtime.spawn({
             let auths = auths.clone();
+            let master = master.clone();
             async move {
                 while let Ok((socket, _)) = listener.accept().await {
-                    tokio::spawn(answer(socket, master, required.clone(), auths.clone()));
+                    let named = master.load(Ordering::SeqCst);
+                    tokio::spawn(answer(socket, named, required.clone(), auths.clone()));
                 }
             }
         });
         Self {
             port,
             auths,
+            master,
             runtime: Some(runtime),
         }
     }
@@ -602,4 +614,305 @@ fn requests_to_a_master_that_is_down_back_off_side_by_side() {
         elapsed < Duration::from_secs(12),
         "4 requests took {elapsed:?}; one alone takes about 6 s"
     );
+}
+
+/// A master of the test's own in front of the standalone server, the way
+/// a Sentinel-managed master is seen by a client: it passes each command
+/// on and its reply back, one at a time, and records the commands. Once
+/// demoted (after answering `scans` SCAN commands, see [`Self::demote`])
+/// it answers everything with READONLY, as an old master that has just
+/// become a replica does, and its sentinel names the next master.
+/// Where a demoted [`Relay`] points its sentinel: the sentinel's master
+/// port, and the next master's.
+type Handoff = Arc<Mutex<Option<(Arc<AtomicU16>, u16)>>>;
+
+struct Relay {
+    port: u16,
+    log: Arc<Mutex<Vec<Vec<String>>>>,
+    /// SCANs left to answer before demoting itself; 0: never.
+    scans: Arc<AtomicUsize>,
+    demoted: Arc<AtomicBool>,
+    /// On demotion: the sentinel's master port, and the next master.
+    next: Handoff,
+    runtime: Option<Runtime>,
+}
+
+impl Relay {
+    fn start() -> Self {
+        let runtime = server_runtime();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        let (scans, demoted, next): (Arc<AtomicUsize>, Arc<AtomicBool>, Handoff) =
+            Default::default();
+        let shared = (log.clone(), scans.clone(), demoted.clone(), next.clone());
+        runtime.spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let (log, scans, demoted, next) = shared.clone();
+                tokio::spawn(async move {
+                    let Ok(server) =
+                        TcpStream::connect(("127.0.0.1", Server::Standalone.port())).await
+                    else {
+                        return;
+                    };
+                    let (client_read, mut client_write) = socket.into_split();
+                    let (server_read, mut server_write) = server.into_split();
+                    let (mut client_read, mut server_read) =
+                        (BufReader::new(client_read), BufReader::new(server_read));
+                    while let Some(argv) = read_command(&mut client_read).await {
+                        log.lock().unwrap().push(argv.clone());
+                        let reply = if demoted.load(Ordering::SeqCst) {
+                            b"-READONLY You can't write against a read only replica.\r\n".to_vec()
+                        } else {
+                            if server_write.write_all(&encode(&argv)).await.is_err() {
+                                return;
+                            }
+                            let Some(reply) = read_reply(&mut server_read).await else {
+                                return;
+                            };
+                            if argv[0].eq_ignore_ascii_case("SCAN")
+                                && scans.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                                    n.checked_sub(1)
+                                }) == Ok(1)
+                            {
+                                demoted.store(true, Ordering::SeqCst);
+                                if let Some((sentinel, port)) = next.lock().unwrap().take() {
+                                    sentinel.store(port, Ordering::SeqCst);
+                                }
+                            }
+                            reply
+                        };
+                        if client_write.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            log,
+            scans,
+            demoted,
+            next,
+            runtime: Some(runtime),
+        }
+    }
+
+    /// After answering `scans` more SCANs, refuses everything and has
+    /// `sentinel` name `next` as the master: a failover in the middle of
+    /// a walk.
+    fn demote(&self, scans: usize, sentinel: &FakeSentinel, next: &Relay) {
+        *self.next.lock().unwrap() = Some((sentinel.master.clone(), next.port));
+        self.scans.store(scans, Ordering::SeqCst);
+    }
+
+    /// Right away, as [`Self::demote`].
+    fn demote_now(&self, sentinel: &FakeSentinel, next: &Relay) {
+        sentinel.master.store(next.port, Ordering::SeqCst);
+        self.demoted.store(true, Ordering::SeqCst);
+    }
+
+    /// The cursors of the SCAN-family commands (`SCAN`, `HSCAN`, ...) it
+    /// was sent, in order.
+    fn cursors(&self, command: &str) -> Vec<String> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|argv| argv[0].eq_ignore_ascii_case(command))
+            .map(|argv| match command {
+                "SCAN" => argv[1].clone(),
+                _ => argv[2].clone(),
+            })
+            .collect()
+    }
+}
+
+impl Drop for Relay {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+fn encode(argv: &[String]) -> Vec<u8> {
+    let mut out = format!("*{}\r\n", argv.len()).into_bytes();
+    for arg in argv {
+        out.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+        out.extend_from_slice(arg.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// One whole RESP reply, as it came.
+async fn read_reply(read: &mut BufReader<OwnedReadHalf>) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pending = 1usize;
+    while pending > 0 {
+        pending -= 1;
+        let mut line = String::new();
+        if read.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        out.extend_from_slice(line.as_bytes());
+        let (kind, rest) = line.split_at(1);
+        let n: i64 = rest.trim().parse().unwrap_or(0);
+        match kind {
+            "$" | "=" | "!" if n >= 0 => {
+                let mut data = vec![0; n as usize + 2];
+                read.read_exact(&mut data).await.ok()?;
+                out.extend_from_slice(&data);
+            }
+            "*" | "~" | ">" if n > 0 => pending += n as usize,
+            "%" | "|" if n > 0 => pending += 2 * n as usize,
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+/// Seeds `n` small strings under the test's prefix on standalone db 0.
+fn seed_many(t: &It, n: usize) {
+    let mut con = t.seed0();
+    let mut p = redis::pipe();
+    for i in 0..n {
+        p.cmd("SET").arg(t.key(&format!("k{i}"))).arg(i).ignore();
+    }
+    p.query::<()>(&mut con).unwrap();
+}
+
+fn matching_keys(t: &It) -> usize {
+    let mut con = raw(Server::Standalone, 0);
+    let mut cursor = 0u64;
+    let mut found = 0;
+    loop {
+        let (next, keys): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(t.pattern())
+            .arg("COUNT")
+            .arg(1000)
+            .query(&mut con)
+            .unwrap();
+        found += keys.len();
+        if next == 0 {
+            return found;
+        }
+        cursor = next;
+    }
+}
+
+/// A walk that a failover moves to another master starts over there,
+/// rather than sending the old master's cursor on: a cursor only means
+/// something on the server that handed it out, and followed elsewhere it
+/// skips keys and still ends "Done". The two masters here are the same
+/// server behind two relays, so the cursors they were sent tell.
+#[test]
+fn walks_start_over_on_the_new_master_after_a_failover() {
+    let Some(t) = it!() else { return };
+    t.uses(Server::Standalone, 0);
+    const KEYS: usize = 6000;
+    seed_many(&t, KEYS);
+
+    // Counting, with the old master refusing the third SCAN.
+    let (old, new) = (Relay::start(), Relay::start());
+    let fake = FakeSentinel::start(old.port, None);
+    let client = block_on(Client::connect(fake.config(standalone(), None))).unwrap();
+    old.demote(2, &fake, &new);
+    let events = collect(client.count_matching(t.pattern()));
+    match events.last() {
+        Some(ScanProgress::Done { keys, .. }) => assert_eq!(*keys, KEYS as u64),
+        other => panic!("{other:?}"),
+    }
+    let cursors = new.cursors("SCAN");
+    assert!(
+        cursors.iter().filter(|c| *c == "0").count() == 1 && cursors[1] == "0",
+        "the count went on with the old master's cursor: {cursors:?}"
+    );
+
+    // Scanning the key list, the same way.
+    let (old, new) = (Relay::start(), Relay::start());
+    let fake = FakeSentinel::start(old.port, None);
+    let client = block_on(Client::connect(fake.config(standalone(), None))).unwrap();
+    old.demote(2, &fake, &new);
+    let tree = Arc::new(Mutex::new(redcrab_core::KeyTree::new(Some(b':'))));
+    let events = collect(client.scan_into(
+        tree.clone(),
+        ScanOptions {
+            pattern: t.pattern(),
+            ..ScanOptions::default()
+        },
+    ));
+    assert_eq!(done(&events), (KEYS, false), "{:?}", events.last());
+    assert!(!matches!(events.last(), Some(ScanEvent::Failed(_))));
+    assert_eq!(new.cursors("SCAN")[1], "0", "{:?}", new.cursors("SCAN"));
+
+    // Deleting: the old master refuses the UNLINKs and the SCAN of the
+    // third round trip; both are sent to the new one, and the walk starts
+    // over there.
+    let (old, new) = (Relay::start(), Relay::start());
+    let fake = FakeSentinel::start(old.port, None);
+    let client = block_on(Client::connect(fake.config(standalone(), None))).unwrap();
+    old.demote(2, &fake, &new);
+    let events = collect(client.delete_matching(t.pattern()).unwrap());
+    match events.last() {
+        Some(DeleteProgress::Done { stats, .. }) => {
+            assert_eq!(stats.deleted, KEYS as u64, "{stats:?}");
+            assert_eq!(stats.failed, 0);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(matching_keys(&t), 0);
+    assert_eq!(new.cursors("SCAN")[1], "0", "{:?}", new.cursors("SCAN"));
+}
+
+/// A hash pages with HSCAN cursors, which mean nothing on another master:
+/// after a failover the next page asks for a reload instead.
+#[test]
+fn value_pages_do_not_follow_a_cursor_to_another_master() {
+    let Some(t) = it!() else { return };
+    let key = t.bkey("hash");
+    let mut con = t.seed0();
+    let mut p = redis::pipe();
+    for i in 0..2000 {
+        p.cmd("HSET")
+            .arg(&*key)
+            .arg(format!("f{i}"))
+            .arg(i)
+            .ignore();
+    }
+    p.query::<()>(&mut con).unwrap();
+
+    let (old, new) = (Relay::start(), Relay::start());
+    let fake = FakeSentinel::start(old.port, None);
+    let client = block_on(Client::connect(fake.config(standalone(), None))).unwrap();
+    let mut loaded = block_on(viewer::load(&client, key.clone())).unwrap();
+    assert!(matches!(loaded.next, Some(Cursor::Scan(_))));
+    // A page on the same master is fine.
+    let more = block_on(loaded.load_more(&client).unwrap()).unwrap();
+    assert!(loaded.apply_page(more));
+    assert!(matches!(loaded.next, Some(Cursor::Scan(_))));
+
+    // The master moves; any request on the client follows it.
+    old.demote_now(&fake, &new);
+    block_on(client.ping()).unwrap();
+    let Err(err) = block_on(loaded.load_more(&client).unwrap()) else {
+        panic!("a page from the new master");
+    };
+    assert!(err.to_string().contains("reload the value"), "{err:#}");
+    assert!(
+        new.cursors("HSCAN").is_empty(),
+        "{:?}",
+        new.cursors("HSCAN")
+    );
+    // Loaded again, it pages on the new master.
+    let mut loaded = block_on(viewer::load(&client, key)).unwrap();
+    while loaded.has_more() {
+        let more = block_on(loaded.load_more(&client).unwrap()).unwrap();
+        assert!(loaded.apply_page(more));
+    }
+    assert_eq!(loaded.data.len(), 2000);
 }

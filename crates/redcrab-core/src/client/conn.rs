@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use redis::{
     Cmd, Pipeline, RedisFuture, RedisResult, Value,
     aio::{ConnectionLike, ConnectionManager},
@@ -55,6 +56,17 @@ impl Conn {
 
     pub(crate) fn is_cluster(&self) -> bool {
         matches!(self, Conn::Cluster(_) | Conn::ClusterNode(_))
+    }
+
+    /// Which server answers now, as far as SCAN cursors care: it changes
+    /// when a Sentinel connection moves to another master. A reconnect to
+    /// the same server keeps it (cursors survive that), and a cluster
+    /// node's requests always go to its own address.
+    pub(crate) fn epoch(&self) -> u64 {
+        match self {
+            Conn::Sentinel(sentinel) => sentinel.generation(),
+            Conn::Single(_) | Conn::Cluster(_) | Conn::ClusterNode(_) => 0,
+        }
     }
 
     /// Runs the `per_key` commands `build` adds for each key in as few
@@ -127,5 +139,110 @@ impl ConnectionLike for Conn {
             Conn::ClusterNode(con) => con.get_db(),
             Conn::Sentinel(con) => con.get_db(),
         }
+    }
+}
+
+/// Walks a SCAN-family cursor that started at 0 on a connection: where the
+/// next round trip asks from, and whether the walk is over.
+///
+/// A cursor only means something on the server that handed it out: each
+/// server orders its table by a random seed of its own. When requests move
+/// to another server mid-walk (a Sentinel failover, whether the round trip
+/// itself was sent again to the new master or another request switched in
+/// between), the cursor would resume at an arbitrary point of the new
+/// server's table and silently skip keys while still ending at 0. So the
+/// walk starts over at 0 on the new server instead: SCAN may return keys
+/// twice anyway, and deleting twice deletes nothing more. A walk that keeps
+/// being moved gives up with an error rather than run forever.
+#[derive(Debug)]
+pub(crate) struct NodeCursor {
+    at: u64,
+    epoch: u64,
+    restarts: u32,
+}
+
+/// What a round trip of a [`NodeCursor`] walk says to do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorStep {
+    /// Use the page, then ask from [`NodeCursor::at`].
+    More,
+    /// Use the page; the walk is complete.
+    Done,
+    /// The server changed: drop what the walk learned from its cursors
+    /// (the page may be anywhere in the new server's table) and ask from
+    /// 0 again.
+    Restarted,
+}
+
+/// Times a walk starts over before it gives up.
+const MAX_RESTARTS: u32 = 3;
+
+impl NodeCursor {
+    /// A walk from cursor 0 on `con` as it is now.
+    pub(crate) fn start(con: &Conn) -> Self {
+        Self::at_epoch(con.epoch())
+    }
+
+    fn at_epoch(epoch: u64) -> Self {
+        Self {
+            at: 0,
+            epoch,
+            restarts: 0,
+        }
+    }
+
+    /// The cursor to ask from.
+    pub(crate) fn at(&self) -> u64 {
+        self.at
+    }
+
+    /// After a round trip that asked from [`Self::at`] and got `next`
+    /// back, with the connection at `epoch` now ([`Conn::epoch`]).
+    pub(crate) fn advance(&mut self, next: u64, epoch: u64) -> Result<CursorStep> {
+        if epoch != self.epoch {
+            self.restarts += 1;
+            if self.restarts > MAX_RESTARTS {
+                bail!(
+                    "the server changed {} times during the walk (Sentinel failovers); try again once the master is settled",
+                    self.restarts
+                );
+            }
+            tracing::info!("the server changed during a SCAN walk; starting it over");
+            self.epoch = epoch;
+            self.at = 0;
+            return Ok(CursorStep::Restarted);
+        }
+        if next == 0 {
+            Ok(CursorStep::Done)
+        } else {
+            self.at = next;
+            Ok(CursorStep::More)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cursor_walk_starts_over_on_another_server() {
+        let mut cursor = NodeCursor::at_epoch(4);
+        assert_eq!(cursor.at(), 0);
+        assert_eq!(cursor.advance(17, 4).unwrap(), CursorStep::More);
+        assert_eq!(cursor.at(), 17);
+        // The reply came from another master: its cursor means nothing.
+        assert_eq!(cursor.advance(99, 5).unwrap(), CursorStep::Restarted);
+        assert_eq!(cursor.at(), 0);
+        // On the new server, as usual.
+        assert_eq!(cursor.advance(3, 5).unwrap(), CursorStep::More);
+        assert_eq!(cursor.at(), 3);
+        // A move on the round trip that ended the walk starts it over too.
+        assert_eq!(cursor.advance(0, 6).unwrap(), CursorStep::Restarted);
+        assert_eq!(cursor.advance(0, 6).unwrap(), CursorStep::Done);
+        // Moved again and again: it gives up rather than walk forever.
+        assert_eq!(cursor.advance(1, 7).unwrap(), CursorStep::Restarted);
+        let err = cursor.advance(1, 8).unwrap_err();
+        assert!(err.to_string().contains("changed 4 times"), "{err}");
     }
 }
