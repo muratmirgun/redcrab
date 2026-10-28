@@ -129,6 +129,20 @@ jobs:
           fi
           cargo build -p redcrab-gui --release --locked
 
+  # Known vulnerabilities (RustSec), licenses that would not allow shipping
+  # redcrab as MIT OR Apache-2.0, and crates from anywhere but crates.io; the
+  # rules and the accepted exceptions are in deny.toml.
+  deny:
+    name: Dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   macos:
     name: macOS
     runs-on: macos-latest

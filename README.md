@@ -301,7 +301,9 @@ environment above and runs the whole suite with `REDCRAB_IT=1` (in a D-Bus sessi
 an unlocked gnome-keyring of its own, which the credential store test needs), then makes
 a release build of the GUI. macOS runs the tests (GitHub's macOS runners have no Docker, so the
 integration tests skip) and builds the GUI; Windows runs the core tests and builds the
-GUI. Every step is a plain shell command, so a failure can be reproduced locally. The
+GUI. A separate job runs [`cargo deny`](deny.toml): known vulnerabilities, licenses that
+would not allow shipping redcrab as MIT OR Apache-2.0, and crates from outside crates.io.
+Every step is a plain shell command, so a failure can be reproduced locally. The
 Rust version is pinned in the workflow (`RUST_TOOLCHAIN`); bump it on purpose.
 
 ## License

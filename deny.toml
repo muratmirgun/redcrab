@@ -1,8 +1,12 @@
-# cargo-deny settings (`cargo deny check advisories`). Only what the project
-# has decided is recorded here; everything else keeps cargo-deny's defaults.
+# cargo-deny settings: `cargo deny check` runs in CI (.github/workflows/ci.yml).
 
 [advisories]
 version = 2
+# "Unmaintained" notices fail the check only for crates redcrab depends on
+# directly, where we can act; deep in GPUI's tree (instant, paste, rustybuzz,
+# the zbus crates, ...) they are GPUI's to replace. Vulnerabilities fail the
+# check wherever they are.
+unmaintained = "workspace"
 ignore = [
     # The `rsa` crate (0.10.0-rc, through russh's `rsa` feature and ssh-key)
     # is not constant-time in its private-key operations (the Marvin attack)
@@ -11,3 +15,37 @@ ignore = [
     # Ed25519 keys. Drop this once a fixed `rsa` reaches russh.
     { id = "RUSTSEC-2023-0071", reason = "RSA SSH keys only; no fixed rsa release yet; see crates/redcrab-core/Cargo.toml" },
 ]
+
+# redcrab ships as MIT OR Apache-2.0 binaries, so every dependency must allow
+# that: permissive licenses, plus MPL-2.0, whose copyleft is per file and is
+# met by the crates' published sources. Where a crate offers a choice
+# (e.g. "Apache-2.0 OR GPL-2.0-only"), an allowed option is enough.
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# Two versions of a crate cost build time and binary size but are not wrong;
+# GPUI's tree has many. Report them without failing.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
