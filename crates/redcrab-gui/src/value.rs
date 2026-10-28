@@ -98,6 +98,10 @@ pub struct ValuePanel {
     confirm_delete: bool,
     /// A change is on its way to the server.
     saving: bool,
+    /// The change on its way is the open row's own save: once it lands,
+    /// the row shows the saved value. Any other change keeps the row's
+    /// unsaved typing.
+    saving_row: bool,
     /// The server refused to run a script for this user
     /// ([`EditError::ScriptsRefused`]): changing rows needs one, so the
     /// panel stops offering it.
@@ -124,6 +128,7 @@ impl ValuePanel {
             row: None,
             confirm_delete: false,
             saving: false,
+            saving_row: false,
             scripts_refused: false,
             scroll: UniformListScrollHandle::new(),
             _load: None,
@@ -191,6 +196,44 @@ impl ValuePanel {
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(key) = self.key.clone() {
             self.load(key, window, cx);
+        }
+    }
+
+    /// The key shown, if any.
+    pub fn key(&self) -> Option<&Key> {
+        self.key.as_ref()
+    }
+
+    /// Whether the value, or its open row, has typing that is not saved.
+    pub fn has_unsaved(&self) -> bool {
+        self.text.as_ref().is_some_and(|text| text.dirty)
+            || self.row.as_ref().is_some_and(RowPane::dirty)
+    }
+
+    /// Loads the value again, asking first if that would drop unsaved
+    /// typing (the Reload button, ⌘R).
+    pub fn reload_asking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_unsaved() {
+            self.reload(window, cx);
+            return;
+        }
+        let this = cx.weak_entity();
+        ask_to_discard_edits(
+            window,
+            cx,
+            move |window, cx| {
+                this.update(cx, |this, cx| this.reload(window, cx)).ok();
+            },
+            |_, _| {},
+        );
+    }
+
+    /// Loads the value again unless that would drop unsaved typing: after
+    /// a bulk delete, which may or may not have taken the key shown. If it
+    /// did, saving says so.
+    pub fn reload_unless_edited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.has_unsaved() {
+            self.reload(window, cx);
         }
     }
 
@@ -378,7 +421,11 @@ impl ValuePanel {
             .map(|name| name.read(cx).value());
         // The key comes from the loaded value, which follows renames.
         match loaded.save_row(&row.edit, &value, name.as_deref()) {
-            Ok(Some(mutation)) => self.send(self.client.clone(), mutation, window, cx),
+            Ok(Some(mutation)) if !self.saving => {
+                self.saving_row = true;
+                self.send(self.client.clone(), mutation, window, cx);
+            }
+            Ok(Some(_)) => {}
             Ok(None) => {
                 row.text.dirty = false;
                 row.name_dirty = false;
@@ -445,13 +492,14 @@ impl ValuePanel {
         if shown {
             self.saving = false;
         }
+        let own_row = std::mem::take(&mut self.saving_row);
         if !client.same_connection(&self.client) {
             Self::elsewhere(&client, &mutation, result, window, cx);
         } else if !shown {
             self.other_key(mutation, result, window, cx);
         } else {
             match result {
-                Ok(outcome) => self.done(mutation, outcome, window, cx),
+                Ok(outcome) => self.done(mutation, outcome, own_row, window, cx),
                 Err(err) => self.refused(client, mutation, err, window, cx),
             }
         }
@@ -576,10 +624,14 @@ impl ValuePanel {
 
     /// Shows a change the server took: patched into the loaded value where
     /// that is possible (keeping pages and scroll), else loaded again.
+    /// `own_row` says the change is the open row's save; any other change
+    /// to a row (one added from a dialog, say) leaves the open row's
+    /// unsaved typing where it is.
     fn done(
         &mut self,
         mutation: Mutation,
         outcome: Outcome,
+        own_row: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -608,6 +660,11 @@ impl ValuePanel {
                 | Mutation::SetString { .. }
                 | Mutation::SetJson { .. }
         );
+        // Deleting rows is confirmed in a dialog; the open row may be one
+        // of them.
+        let keep_row = !own_row
+            && !matches!(outcome, Outcome::Removed(_))
+            && self.row.as_ref().is_some_and(RowPane::dirty);
         match loaded.apply(&mutation, &outcome) {
             Applied::KeyGone => {
                 let key = loaded.key.clone();
@@ -634,7 +691,11 @@ impl ValuePanel {
                         Self::text_pane(edit, window, cx)
                     });
                 }
-                if row_change {
+                if row_change && keep_row {
+                    // Indexes may have moved; the open row is found by
+                    // its element when it is saved.
+                    self.picked.clear();
+                } else if row_change {
                     self.picked.clear();
                     match select {
                         Some(ix) => {
@@ -872,9 +933,9 @@ impl ValuePanel {
                 let client = client.clone();
                 this.update(cx, |this, cx| {
                     // Not holding up saves: dialogs do not set `saving`.
-                    let saving = this.saving;
+                    let (saving, saving_row) = (this.saving, this.saving_row);
                     this.finished(client, mutation, Ok(outcome), window, cx);
-                    this.saving = saving;
+                    (this.saving, this.saving_row) = (saving, saving_row);
                     cx.notify();
                 })
                 .ok();
@@ -1088,7 +1149,7 @@ impl ValuePanel {
                     .small()
                     .icon(IconName::RefreshCw)
                     .tooltip("Reload value")
-                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.reload_asking(window, cx))),
             )
             .when(writable, |this| {
                 this.child(
@@ -1398,6 +1459,34 @@ impl ValuePanel {
                 )
             })
     }
+}
+
+/// Asks whether to drop the value's (or its open row's) unsaved typing:
+/// `then` runs if the user agrees, `otherwise` if not.
+pub fn ask_to_discard_edits(
+    window: &mut Window,
+    cx: &mut App,
+    then: impl Fn(&mut Window, &mut App) + 'static,
+    otherwise: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let (then, otherwise) = (Rc::new(then), Rc::new(otherwise));
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let (then, otherwise) = (then.clone(), otherwise.clone());
+        alert
+            .title("Discard changes?")
+            .description("The value has changes that are not saved.")
+            .ok_text("Discard")
+            .ok_variant(ButtonVariant::Danger)
+            .show_cancel(true)
+            .on_ok(move |_, window, cx| {
+                then(window, cx);
+                true
+            })
+            .on_cancel(move |_, window, cx| {
+                otherwise(window, cx);
+                true
+            })
+    });
 }
 
 /// A line of advice above an editor.

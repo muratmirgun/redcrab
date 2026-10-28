@@ -16,13 +16,13 @@ use gpui_kit::{
     prelude::FluentBuilder as _,
     px,
 };
-use redcrab_core::{Client, ServerInfo};
+use redcrab_core::{Client, Key, ServerInfo};
 
 use crate::{
     DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
-    value::{ValueEvent, ValuePanel},
+    value::{ValueEvent, ValuePanel, ask_to_discard_edits},
 };
 
 pub enum WorkspaceEvent {
@@ -59,11 +59,7 @@ impl Workspace {
 
         let subscriptions = vec![
             cx.subscribe_in(&keys, window, |this, _, event, window, cx| match event {
-                KeyEvent::Selected(key) => {
-                    let key = key.clone();
-                    this.value
-                        .update(cx, |value, cx| value.load(key, window, cx));
-                }
+                KeyEvent::Selected(key) => this.show_key(key.clone(), window, cx),
                 KeyEvent::Deleted(key) => {
                     this.value
                         .update(cx, |value, cx| value.key_deleted(key, cx));
@@ -73,11 +69,13 @@ impl Workspace {
                     this.value
                         .update(cx, |value, cx| value.folder_deleted(prefix, separator, cx));
                 }
-                // The key shown may be one of them; loading it again tells.
+                // The key shown may be one of them; loading it again tells,
+                // unless that would drop unsaved typing (saving tells then).
                 KeyEvent::KeysDeleted => {
-                    this.value.update(cx, |value, cx| value.reload(window, cx));
+                    this.value
+                        .update(cx, |value, cx| value.reload_unless_edited(window, cx));
                 }
-                KeyEvent::SwitchDb(db) => this.switch_db(*db, window, cx),
+                KeyEvent::SwitchDb(db) => this.ask_to_switch_db(*db, window, cx),
             }),
             cx.subscribe_in(&value, window, |this, _, event, _, cx| match event {
                 ValueEvent::Deleted(key) => {
@@ -152,6 +150,60 @@ impl Workspace {
         })
     }
 
+    /// Shows the key the user picked in the list. Unsaved typing in the
+    /// value panel is not dropped without asking; if the user keeps it,
+    /// the list goes back to the key shown.
+    fn show_key(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.value.read(cx);
+        if !value.has_unsaved() {
+            self.value
+                .update(cx, |value, cx| value.load(key, window, cx));
+            return;
+        }
+        let Some(shown) = value.key().cloned() else {
+            return;
+        };
+        if shown == key {
+            // Picking the key shown again keeps its typing.
+            return;
+        }
+        let (value, keys) = (self.value.downgrade(), self.keys.downgrade());
+        ask_to_discard_edits(
+            window,
+            cx,
+            move |window, cx| {
+                let key = key.clone();
+                value
+                    .update(cx, |value, cx| value.load(key, window, cx))
+                    .ok();
+            },
+            move |_, cx| {
+                keys.update(cx, |keys, cx| keys.reselect(&shown, cx)).ok();
+            },
+        );
+    }
+
+    /// Switches to database `db`, asking first if that would drop unsaved
+    /// typing in the value panel.
+    fn ask_to_switch_db(&mut self, db: u32, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.value.read(cx).has_unsaved() {
+            self.switch_db(db, window, cx);
+            return;
+        }
+        let (this, keys) = (cx.weak_entity(), self.keys.downgrade());
+        ask_to_discard_edits(
+            window,
+            cx,
+            move |window, cx| {
+                this.update(cx, |this, cx| this.switch_db(db, window, cx))
+                    .ok();
+            },
+            move |_, cx| {
+                keys.update(cx, |keys, cx| keys.switch_failed(cx)).ok();
+            },
+        );
+    }
+
     /// Connects to database `db` of the same server, then moves every view
     /// over to it. Until then everything stays on the current one.
     fn switch_db(&mut self, db: u32, window: &mut Window, cx: &mut Context<Self>) {
@@ -192,7 +244,8 @@ impl Workspace {
 
     fn refresh(&mut self, _: &Refresh, window: &mut Window, cx: &mut Context<Self>) {
         self.keys.update(cx, |keys, cx| keys.rescan(window, cx));
-        self.value.update(cx, |value, cx| value.reload(window, cx));
+        self.value
+            .update(cx, |value, cx| value.reload_asking(window, cx));
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {

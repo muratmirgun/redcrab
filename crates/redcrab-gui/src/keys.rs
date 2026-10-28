@@ -507,6 +507,14 @@ impl KeyBrowser {
         cx.notify();
     }
 
+    /// Selects `key` again: the user chose to stay on the key shown.
+    pub fn reselect(&mut self, key: &[u8], cx: &mut Context<Self>) {
+        if let Some(ix) = self.model.select_key(key) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
     /// Shows a key renamed in the app without selecting it or rescanning.
     pub fn insert_key(&mut self, key: &[u8], cx: &mut Context<Self>) {
         if self.model.insert_key(key) {
