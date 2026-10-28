@@ -23,8 +23,11 @@ impl Temp {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         // The canonical path, as `current_exe` gives it (/private/var on
-        // macOS).
-        Self(fs::canonicalize(&path).unwrap())
+        // macOS). Not on Windows, where that is a `\\?\` path, in which `/`
+        // does not separate.
+        #[cfg(unix)]
+        let path = fs::canonicalize(&path).unwrap();
+        Self(path)
     }
 }
 
@@ -135,6 +138,7 @@ fn publish(server: &Server, v: &str, name: &str, package: &[u8], key: &Ed25519Ke
 }
 
 /// Runs an update to its end, as [`start`] does.
+#[cfg(unix)]
 fn run_update(release: &Release, install: &Install, key: &[u8; 32]) -> Result<Option<Installed>> {
     let (reporter, _updates) = progress::channel();
     update(release, install, key, &reporter)

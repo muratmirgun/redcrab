@@ -685,6 +685,20 @@ mod tests {
         (handle, updater)
     }
 
+    /// Lets an update started on the I/O runtime's threads come to an end.
+    fn settle(cx: &mut TestAppContext, updater: &Entity<Updater>) {
+        cx.executor().allow_parking();
+        for _ in 0..500 {
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            if updater.read_with(cx, |updater, _| !updater.busy()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the update did not end");
+    }
+
     fn dialog_open(cx: &mut TestAppContext, handle: AnyWindowHandle) -> bool {
         cx.update_window(handle, |_, window, cx| window.has_active_dialog(cx))
             .unwrap()
@@ -765,7 +779,7 @@ mod tests {
         };
         let (_, updater) = offered(cx, manual, &file);
         updater.update(cx, |updater, cx| updater.install(cx));
-        cx.run_until_parked();
+        settle(cx, &updater);
         updater.read_with(cx, |updater, _| {
             assert!(matches!(
                 &updater.state,
@@ -778,21 +792,12 @@ mod tests {
     fn a_failed_update_says_so_and_is_offered_again(cx: &mut TestAppContext) {
         let file = settings_file("failed");
         let (_, updater) = offered(cx, mac_app(), &file);
-        // The download runs on the I/O runtime's threads.
-        cx.executor().allow_parking();
         updater.update(cx, |updater, cx| updater.install(cx));
         updater.read_with(cx, |updater, _| {
             assert!(matches!(updater.state, State::Downloading { .. }));
             assert!(updater.busy());
         });
-        for _ in 0..500 {
-            cx.executor().advance_clock(Duration::from_millis(100));
-            cx.run_until_parked();
-            if updater.read_with(cx, |updater, _| !updater.busy()) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        settle(cx, &updater);
         updater.read_with(cx, |updater, _| {
             assert!(
                 matches!(&updater.state, State::Failed { installed: false, error, .. } if error.contains("SHA256SUMS")),
