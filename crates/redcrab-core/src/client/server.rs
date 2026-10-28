@@ -63,6 +63,12 @@ impl ServerNode {
         &self.label
     }
 
+    /// The host and port of a cluster primary, for a connection of its
+    /// own to it; `None` for the others, which have one server.
+    pub(crate) fn host_port(&self) -> Option<(String, u16)> {
+        crate::config::parse_address(&self.conn.address()?).ok()
+    }
+
     pub fn info(&self) -> impl Future<Output = Result<Info>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         spawn(async move {

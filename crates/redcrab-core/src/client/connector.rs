@@ -140,6 +140,37 @@ impl Connector {
         matches!(self, Self::Cluster { .. })
     }
 
+    /// A redis-rs client for a connection that only listens (Pub/Sub,
+    /// MONITOR), which redis-rs opens itself: the server, the master the
+    /// sentinels name now, or a cluster's primary at `node` (`host`,
+    /// `port`), by default the one a console's commands without a key go
+    /// to.
+    pub(crate) async fn listener(
+        &self,
+        config: &ConnectionConfig,
+        node: Option<(String, u16)>,
+    ) -> Result<redis::Client> {
+        match self {
+            Self::Direct { redis, .. } => Ok((**redis).clone()),
+            Self::Sentinel(sentinel) => {
+                let (host, port) = sentinel.resolve().await?;
+                config.client_for(Target::Tcp(&host, port))
+            }
+            Self::Cluster { cluster, .. } => {
+                let (host, port) = match node {
+                    Some(node) => node,
+                    None => {
+                        let (home, _) = cluster
+                            .home(config.host.trim(), config.port)
+                            .ok_or_else(|| anyhow::anyhow!("the cluster has no primary"))?;
+                        (home.host, home.port)
+                    }
+                };
+                config.client_for(Target::Tcp(&host, port))
+            }
+        }
+    }
+
     /// Opens a connection. `connect_timeout` bounds the connection step;
     /// replies have no timeout, the caller applies its own.
     pub(crate) async fn connect(
