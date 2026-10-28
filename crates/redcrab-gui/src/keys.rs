@@ -314,14 +314,20 @@ impl KeyBrowser {
         cx.notify();
     }
 
+    /// The pattern "Delete matching…" would delete: the filter's, if it
+    /// leaves keys out. `None` for no filter, and for one like `*` that
+    /// matches every key (deleting those empties the database; the core
+    /// refuses it too).
+    fn filter_pattern(&self, cx: &App) -> Option<Vec<u8>> {
+        let pattern = browser::pattern_for(&self.search.read(cx).value()).into_bytes();
+        (!browser::is_match_all(&pattern)).then_some(pattern)
+    }
+
     /// "Delete matching…": every key the filter matches.
     fn delete_matching(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.search.read(cx).value().to_string();
-        if query.trim().is_empty() {
-            return;
+        if let Some(pattern) = self.filter_pattern(cx) {
+            self.open_bulk(Target::Pattern(pattern), window, cx);
         }
-        let pattern = browser::pattern_for(&query).into_bytes();
-        self.open_bulk(Target::Pattern(pattern), window, cx);
     }
 
     // The row context menu. Each action acts on the row as it was drawn,
@@ -692,8 +698,7 @@ impl KeyBrowser {
         // A cluster (or a server configured with one database) has nothing
         // to switch to.
         let switcher = self.databases.len() > 1;
-        let filtered = !self.search.read(cx).value().trim().is_empty();
-        let delete = filtered && !self.read_only();
+        let delete = !self.read_only() && self.filter_pattern(cx).is_some();
         if !switcher && !delete {
             return None;
         }

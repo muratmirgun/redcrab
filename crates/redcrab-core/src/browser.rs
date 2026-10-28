@@ -54,6 +54,14 @@ pub fn pattern_for(query: &str) -> String {
     }
 }
 
+/// Whether a glob pattern matches every key: it is made of `*` and `?`
+/// alone, with at least one `*` (`*`, `**`, `?*`; with `?` it misses only
+/// keys shorter than its `?` count). Filtering with one shows the whole
+/// list, and deleting what it matches empties the database, like FLUSHDB.
+pub fn is_match_all(pattern: &[u8]) -> bool {
+    pattern.contains(&b'*') && pattern.iter().all(|&b| matches!(b, b'*' | b'?'))
+}
+
 /// Escapes the glob characters of `bytes` (`* ? [ ] \`), so that a literal
 /// key prefix can be used in a MATCH pattern.
 pub fn escape_glob(bytes: &[u8]) -> Vec<u8> {
@@ -230,7 +238,7 @@ impl KeyBrowser {
     /// selection is kept by key and comes back once the new scan finds it.
     pub fn begin_scan(&mut self, query: &str) -> ScanRequest {
         let pattern = pattern_for(query);
-        self.filtered = pattern != "*";
+        self.filtered = !is_match_all(pattern.as_bytes());
         if let Some((node, kind)) = self.selected.take() {
             let key = self.tree().key(node);
             self.reselect = Some((key, kind));
@@ -299,6 +307,12 @@ impl KeyBrowser {
 
     pub fn status(&self) -> &ScanStatus {
         &self.status
+    }
+
+    /// Whether the last scan was for a filter that leaves keys out (not an
+    /// empty one, nor one like `*` that matches every key).
+    pub fn is_filtered(&self) -> bool {
+        self.filtered
     }
 
     pub fn is_scanning(&self) -> bool {

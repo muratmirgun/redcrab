@@ -405,6 +405,32 @@ fn adds_created_keys_open_and_selected() {
 }
 
 #[test]
+fn patterns_that_match_every_key_are_no_filter() {
+    for pattern in ["*", "**", "?*", "*?", "??*", "*?*"] {
+        assert!(is_match_all(pattern.as_bytes()), "{pattern}");
+    }
+    for pattern in ["", "?", "??", "a*", "*a", "[*]", "\\*", "*:*", "* "] {
+        assert!(!is_match_all(pattern.as_bytes()), "{pattern}");
+    }
+    let mut browser = KeyBrowser::new(b':', None);
+    for (query, filtered) in [
+        ("", false),
+        ("  ", false),
+        ("*", false),
+        (" ** ", false),
+        ("?*", false),
+        ("user", true),
+        ("user:*", true),
+        ("?", true),
+    ] {
+        scan(&mut browser, query, &["a"]);
+        assert_eq!(browser.is_filtered(), filtered, "{query:?}");
+        let noun = if filtered { "match" } else { "key" };
+        assert!(browser.status_text().contains(noun), "{query:?}");
+    }
+}
+
+#[test]
 fn renames_and_new_keys_keep_the_count_of_a_finished_scan() {
     let mut browser = KeyBrowser::new(b':', None);
     scan(&mut browser, "", &["a", "b", "c"]);

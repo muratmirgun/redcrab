@@ -23,7 +23,7 @@
 use std::{borrow::Cow, time::Duration};
 
 use crate::{
-    browser::folder_pattern,
+    browser::{folder_pattern, is_match_all},
     client::{DeleteProgress, DeleteStats, Key, ScanProgress},
     format,
 };
@@ -72,6 +72,9 @@ pub enum Phase {
     Cancelled,
     /// The count failed; nothing was deleted.
     CountFailed(String),
+    /// The flow would not start: the pattern matches every key (see
+    /// [`is_match_all`]), and emptying a database is not a bulk delete.
+    Refused(String),
     /// The delete is over: what it did, and how it ended.
     Finished {
         stats: DeleteStats,
@@ -110,12 +113,23 @@ pub struct BulkDelete {
 
 impl BulkDelete {
     /// Starts at counting: run the count for [`Self::pattern`] right away.
+    /// A pattern that matches every key (`*`, `**`, `?*`) is refused
+    /// instead: the flow starts over ([`Phase::Refused`]), and no count or
+    /// delete is to be run for it.
     pub fn new(target: Target) -> Self {
         let pattern = target.pattern();
+        let phase = if is_match_all(&pattern) {
+            Phase::Refused(format!(
+                "{} matches every key in the database; filter by something narrower",
+                format::copyable(&pattern)
+            ))
+        } else {
+            Phase::Counting { keys: 0 }
+        };
         Self {
             target,
             pattern,
-            phase: Phase::Counting { keys: 0 },
+            phase,
             confirmed: 0,
         }
     }
@@ -162,7 +176,11 @@ impl BulkDelete {
     pub fn is_over(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Empty | Phase::Cancelled | Phase::CountFailed(_) | Phase::Finished { .. }
+            Phase::Empty
+                | Phase::Cancelled
+                | Phase::CountFailed(_)
+                | Phase::Refused(_)
+                | Phase::Finished { .. }
         )
     }
 
@@ -276,6 +294,7 @@ impl BulkDelete {
             }
             Phase::Cancelled => "Nothing was deleted.".into(),
             Phase::CountFailed(error) => format!("Could not count the keys: {error}"),
+            Phase::Refused(why) => format!("Nothing was deleted: {why}."),
             Phase::Finished { stats, ending } => {
                 let deleted = keys_text(stats.deleted);
                 let mut text = match ending {
@@ -472,6 +491,40 @@ mod tests {
         });
         assert_eq!(flow.message(), "Deleted 1 key in 2 ms.");
         assert_eq!(flow.refresh(), Some(Refresh::Rescan));
+    }
+
+    #[test]
+    fn patterns_matching_every_key_are_refused() {
+        for pattern in ["*", "**", "?*", "*?", "*??*"] {
+            let mut flow = BulkDelete::new(Target::Pattern(pattern.into()));
+            assert!(
+                matches!(flow.phase(), Phase::Refused(_)),
+                "{pattern}: {:?}",
+                flow.phase()
+            );
+            assert!(flow.is_over() && !flow.is_running());
+            assert_eq!(
+                flow.message(),
+                format!(
+                    "Nothing was deleted: {pattern} matches every key in the database; filter by something narrower."
+                )
+            );
+            // Nothing can move it on to a delete.
+            assert!(!flow.on_count(done(5)));
+            assert!(!flow.confirm());
+            assert_eq!(flow.stop(), Stop::Nothing);
+            assert_eq!((flow.confirm_label(), flow.refresh()), (None, None));
+        }
+        // Narrower patterns, and folders (whose prefix is literal), count.
+        for pattern in ["a*", "*a*", "?", "[ab]*", "\\**", ""] {
+            let flow = BulkDelete::new(Target::Pattern(pattern.into()));
+            assert_eq!(flow.phase(), &Phase::Counting { keys: 0 }, "{pattern}");
+        }
+        let flow = BulkDelete::new(Target::Folder {
+            prefix: Key::from(&b"*"[..]),
+            separator: b':',
+        });
+        assert_eq!(flow.phase(), &Phase::Counting { keys: 0 });
     }
 
     #[test]

@@ -108,6 +108,12 @@ impl BulkDeleteView {
     }
 
     fn count(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Refused before it started (a pattern matching every key): only
+        // the reason to show.
+        if self.flow.is_over() {
+            self.changed(window, cx);
+            return;
+        }
         let mut events = self.client.count_matching(self.flow.pattern().to_vec());
         self._walk = Some(cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
@@ -272,6 +278,7 @@ impl Render for BulkDeleteView {
         let failed = matches!(
             self.flow.phase(),
             Phase::CountFailed(_)
+                | Phase::Refused(_)
                 | Phase::Finished {
                     ending: Ending::Failed(_),
                     ..
