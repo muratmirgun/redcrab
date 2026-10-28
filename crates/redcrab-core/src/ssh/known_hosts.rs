@@ -363,7 +363,9 @@ fn read(path: &Path) -> String {
 /// [`host_port`]): some pattern matches and no negated (`!`) one does.
 pub(crate) fn hosts_match(patterns: &str, name: &str) -> bool {
     let mut matched = false;
-    for pattern in patterns.split(',') {
+    // An empty pattern (`a,,b`, a lone `,`) names no host; matched as a
+    // glob it would match an empty name.
+    for pattern in patterns.split(',').filter(|p| !p.is_empty() && *p != "!") {
         match pattern.strip_prefix('!') {
             Some(negated) if pattern_matches(negated, name) => return false,
             Some(_) => {}
@@ -808,6 +810,16 @@ mod tests {
                 .verify("bastion", 22, &server, HostKeyPolicy::Strict)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn empty_patterns_match_no_host() {
+        for patterns in [",", ",,", "!", ",!", "a,,b"] {
+            assert!(!hosts_match(patterns, ""), "{patterns:?}");
+        }
+        assert!(hosts_match("a,,b", "b"));
+        assert!(!hosts_match("*,!,!b", "b"));
+        assert!(hosts_match("*,!", "x"));
     }
 
     /// A slow but obviously right glob, to check the fast one against.
