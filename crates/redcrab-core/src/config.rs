@@ -190,6 +190,13 @@ impl ConnectionConfig {
             ),
             None => {
                 anyhow::ensure!(!insecure, "#insecure only applies to rediss:// URLs");
+                if let Some((scheme, _)) = rest.split_once("://")
+                    && scheme != "redis"
+                {
+                    bail!(
+                        "{scheme}:// is not a Redis URL: use redis://host:port, or rediss:// for TLS"
+                    );
+                }
                 (rest.strip_prefix("redis://").unwrap_or(rest), None)
             }
         };
@@ -198,12 +205,20 @@ impl ConnectionConfig {
             None => (None, rest),
         };
         let (address, db) = match rest.split_once('/') {
-            Some((address, db)) if !db.is_empty() => (address, db.parse()?),
+            Some((address, db)) if !db.is_empty() => (
+                address,
+                db.parse()
+                    .with_context(|| format!("{db:?} is not a database number"))?,
+            ),
             Some((address, _)) => (address, 0),
             None => (rest, 0),
         };
         let (host, port) = match address.rsplit_once(':') {
-            Some((host, port)) => (host, port.parse()?),
+            Some((host, port)) => (
+                host,
+                port.parse()
+                    .with_context(|| format!("{port:?} is not a port number"))?,
+            ),
             None => (address, 6379),
         };
         anyhow::ensure!(!host.is_empty(), "missing host in {url}");
@@ -573,7 +588,10 @@ mod tests {
         );
         let c = ConnectionConfig::parse_url("redis://:pw@h:1/").unwrap();
         assert_eq!((c.username, c.password.as_deref()), (None, Some("pw")));
-        assert!(ConnectionConfig::parse_url("h:notaport").is_err());
+        let err = |url| format!("{:#}", ConnectionConfig::parse_url(url).unwrap_err());
+        assert!(err("h:notaport").starts_with("\"notaport\" is not a port number"));
+        assert!(err("redis://h/x").starts_with("\"x\" is not a database number"));
+        assert!(err("http://h:6379").starts_with("http:// is not a Redis URL"));
     }
 
     #[test]
