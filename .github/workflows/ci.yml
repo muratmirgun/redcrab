@@ -127,7 +127,7 @@ jobs:
             echo "::warning title=Thin LTO::This runner has ${mem_mib} MiB of memory, too little for the release profile's fat LTO; building with thin LTO instead."
             export CARGO_PROFILE_RELEASE_LTO=thin
           fi
-          cargo build -p redcrab-gui --release --locked
+          cargo build -p redcrab-gui -p redcrab-tui --release --locked
 
   # Known vulnerabilities (RustSec), licenses that would not allow shipping
   # redcrab as MIT OR Apache-2.0, and crates from anywhere but crates.io; the
@@ -218,8 +218,8 @@ jobs:
         run: echo "REDCRAB_CONFIG_DIR=$RUNNER_TEMP/redcrab-config" >>"$GITHUB_ENV"
 
       # No Docker either; the integration tests print "skipped".
-      - name: Test the core
-        run: cargo test -p redcrab-core --locked --no-fail-fast
+      - name: Test the core and the terminal app
+        run: cargo test -p redcrab-core -p redcrab-tui --locked --no-fail-fast
 
       - name: Build the GUI
         run: cargo build -p redcrab-gui --locked

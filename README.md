@@ -264,12 +264,36 @@ connections:
 | Keys per SCAN | 2,000 | The `COUNT` of each `SCAN`: smaller keeps each round trip short on a busy server, larger loads faster. |
 | Check for updates automatically | On | Packaged builds only. |
 
+## Terminal app
+
+`redcrab-tui` is redcrab in a terminal, for a server reached over SSH or a machine
+without a GPU: the same saved connections and passwords, the key tree, values of every
+type, editing and the console, on the same core.
+
+```sh
+redcrab-tui                          # pick a saved connection
+redcrab-tui orders                   # connect to the saved connection "orders"
+redcrab-tui redis://:pw@10.0.0.5:6379/2
+```
+
+The keys are vim's or the arrows: <kbd>j</kbd> <kbd>k</kbd> to move, <kbd>l</kbd>
+<kbd>h</kbd> to open and close folders, <kbd>/</kbd> to filter, <kbd>Tab</kbd> to the
+next pane, <kbd>:</kbd> for the console, <kbd>?</kbd> for all of them. In the value,
+<kbd>f</kbd> cycles the format (Text, JSON, Hex, Base64, MessagePack, gzip),
+<kbd>e</kbd> edits it in `$VISUAL` or `$EDITOR`, <kbd>t</kbd> sets the TTL,
+<kbd>R</kbd> renames the key, <kbd>a</kbd> adds a row and <kbd>x</kbd> deletes the rows
+picked with <kbd>Space</kbd>. <kbd>n</kbd> makes a key, <kbd>D</kbd> deletes one, and
+<kbd>b</kbd> switches the database. A read-only connection stays read-only here too.
+Connections are added and edited in the desktop app; the server tools, the memory
+analysis and Pub/Sub are there too, for now.
+
 ## Layout
 
 | Crate | What |
 | --- | --- |
 | `redcrab-core` | Connections, scanning, the key tree, value paging, formatting. No UI. |
 | `redcrab-gui`  | The desktop app (`redcrab` binary). |
+| `redcrab-tui`  | The terminal app (`redcrab-tui` binary), on ratatui. |
 
 Logo sources live in [`assets/logo`](assets/logo): `mark.svg` (two-tone), `mark-mono.svg`
 (one color), and the app icon (`icon.svg`, with `icon-small.svg` for 16 and 32 px).

@@ -1,0 +1,27 @@
+[package]
+name = "redcrab-tui"
+description = "redcrab in a terminal: keys, values and a console for Redis and Valkey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "redcrab-tui"
+path = "src/main.rs"
+
+[dependencies]
+redcrab-core.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The crossterm backend only, on the crossterm ratatui is built for, with
+# its async event stream for the event loop.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache", "underline-color"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+[dev-dependencies]
+# Seeding and checking the server in the tests, apart from the code tested.
+redis.workspace = true
