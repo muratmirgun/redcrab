@@ -1681,6 +1681,12 @@ pub fn ask_to_discard_edits(
     then: impl Fn(&mut Window, &mut App) + 'static,
     otherwise: impl Fn(&mut Window, &mut App) + 'static,
 ) {
+    // One question at a time: another one open (this one, asked again by
+    // a repeating key) counts as "keep them".
+    if window.has_active_dialog(cx) {
+        otherwise(window, cx);
+        return;
+    }
     let (then, otherwise) = (Rc::new(then), Rc::new(otherwise));
     window.open_alert_dialog(cx, move |alert, _, _| {
         let (then, otherwise) = (then.clone(), otherwise.clone());
