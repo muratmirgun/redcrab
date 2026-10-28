@@ -503,6 +503,30 @@ impl ConnectionConfig {
         }
         label
     }
+
+    /// Where the connection's keys are, for a question about changing
+    /// them: the name, [`Self::route_label`], and the database where there
+    /// are databases (not on a cluster): `prod · 10.0.0.5:6379 · db2`,
+    /// `prod · sentinel mymaster · db0`, `prod · /tmp/redis.sock · db0`,
+    /// `prod · localhost:6379 via SSH ops@bastion · db0`,
+    /// `prod · cluster 10.0.0.2:7000`. A connected client says more
+    /// ([`Client::location`](crate::Client::location)).
+    pub fn location(&self) -> String {
+        self.location_via(self.route_label())
+    }
+
+    /// [`Self::location`] with `route` in place of the route label.
+    pub(crate) fn location_via(&self, route: String) -> String {
+        let mut parts = Vec::with_capacity(3);
+        if !self.name.trim().is_empty() {
+            parts.push(self.name.trim().to_string());
+        }
+        parts.push(route);
+        if self.topology.supports_databases() {
+            parts.push(format!("db{}", self.db));
+        }
+        parts.join(" · ")
+    }
 }
 
 /// Why `host` is not a host name or address, if it is not.
@@ -1064,6 +1088,41 @@ mod tests {
         assert_eq!(cluster(&[]).route_label(), "cluster 127.0.0.1:7000");
         let s = sentinel("mymaster", &["a:1"]);
         assert_eq!(s.route_label(), "sentinel mymaster");
+
+        // Where keys would be deleted: never the unused host and port of a
+        // Sentinel or socket connection, and no database on a cluster.
+        let named = |config: ConnectionConfig| ConnectionConfig {
+            name: "prod".into(),
+            db: 2,
+            ..config
+        };
+        assert_eq!(
+            named(config.clone()).location(),
+            "prod · 127.0.0.1:6379 via SSH ops@bastion:2222 · db2"
+        );
+        assert_eq!(
+            named(s.clone()).location(),
+            "prod · sentinel mymaster · db2"
+        );
+        assert_eq!(
+            named(unix("/tmp/r.sock")).location(),
+            "prod · /tmp/r.sock · db2"
+        );
+        assert_eq!(
+            ConnectionConfig {
+                name: "prod".into(),
+                ..cluster(&[])
+            }
+            .location(),
+            "prod · cluster 127.0.0.1:7000"
+        );
+        assert_eq!(standalone().location_via("x".into()), "test · x · db0");
+        // A connection without a name (a URL start) is not named.
+        let unnamed = ConnectionConfig {
+            name: " ".into(),
+            ..standalone()
+        };
+        assert_eq!(unnamed.location(), "127.0.0.1:6379 · db0");
         assert_eq!(s.suggested_name(), "mymaster");
         let u = unix("/var/run/redis.sock");
         assert_eq!(u.endpoint(), "/var/run/redis.sock");

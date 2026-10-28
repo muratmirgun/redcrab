@@ -103,6 +103,13 @@ fn everything_works_over_a_unix_socket() {
         [format!("unix socket {}", proxy.path.display())]
     );
     assert!(client.topology().supports_databases());
+    assert!(
+        client
+            .location()
+            .ends_with(&format!(" · {} · db0", proxy.path.display())),
+        "{}",
+        client.location()
+    );
 
     let keys: Vec<_> = (0..50).map(|i| t.bkey(format!("k{i}"))).collect();
     for key in &keys {

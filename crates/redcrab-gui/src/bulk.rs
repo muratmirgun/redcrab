@@ -38,7 +38,8 @@ pub struct BulkDeleteView {
     /// to meanwhile.
     client: Client,
     flow: BulkDelete,
-    /// Where the keys are: "cache · 10.0.0.5:6379 · db0".
+    /// Where the keys are: "cache · 10.0.0.5:6379 · db0", "cache ·
+    /// sentinel mymaster @ 10.0.0.7:6379 · db0" (see [`Client::location`]).
     location: String,
     /// [`BulkEvent::Finished`] went out.
     reported: bool,
@@ -57,8 +58,7 @@ impl EventEmitter<BulkEvent> for BulkDeleteView {}
 impl BulkDeleteView {
     /// Opens the dialog for `target` and starts counting.
     pub fn open(client: Client, target: Target, window: &mut Window, cx: &mut App) -> Entity<Self> {
-        let config = client.config();
-        let location = format!("{} · {} · db{}", config.name, config.address(), config.db);
+        let location = client.location();
         let view = cx.new(|_| Self {
             client,
             flow: BulkDelete::new(target),

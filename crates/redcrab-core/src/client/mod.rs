@@ -498,6 +498,31 @@ impl Client {
         parts
     }
 
+    /// Where the client's keys are, for a question about changing them
+    /// (a delete's confirmation): [`ConnectionConfig::location`], with the
+    /// Sentinel master's address as last resolved and a cluster's primary
+    /// count, so it names the server the change would go to:
+    /// `prod · sentinel mymaster @ 10.0.0.7:6379 · db0`,
+    /// `prod · cluster of 3 primaries`.
+    pub fn location(&self) -> String {
+        let route = match &self.conn {
+            Conn::Sentinel(sentinel) => format!(
+                "sentinel {} @ {}",
+                sentinel.master_name(),
+                sentinel.address()
+            ),
+            Conn::Cluster(cluster) => {
+                let n = cluster.primary_count();
+                format!(
+                    "cluster of {n} {}",
+                    if n == 1 { "primary" } else { "primaries" }
+                )
+            }
+            Conn::Single(_) | Conn::ClusterNode(_) => self.config.route_label(),
+        };
+        self.config.location_via(route)
+    }
+
     /// The local end of the SSH tunnel, if the client uses one.
     pub fn ssh_tunnel(&self) -> Option<SocketAddr> {
         self.connector.tunnel().map(Tunnel::local_addr)

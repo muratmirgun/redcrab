@@ -151,6 +151,15 @@ fn connects_to_the_master_sentinel_names() {
         [format!("sentinel · mymaster @ 127.0.0.1:{master}")]
     );
     assert!(client.topology().supports_databases());
+    // Where a delete would go: the master, not the unused host and port.
+    assert!(
+        client.location().ends_with(&format!(
+            " · sentinel mymaster @ 127.0.0.1:{master} · db{}",
+            client.config().db
+        )),
+        "{}",
+        client.location()
+    );
 
     let key = t.bkey("hello");
     put_string(&client, &key, b"world \xff");

@@ -127,6 +127,12 @@ fn a_node_set_up_as_standalone_connects_to_its_cluster() {
     assert!(client.topology().is_cluster());
     assert!(!client.topology().supports_databases());
     assert_eq!(client.topology_summary(), ["cluster · 3 primaries"]);
+    // A cluster has no database to name.
+    assert!(
+        client.location().ends_with(" · cluster of 3 primaries"),
+        "{}",
+        client.location()
+    );
     let found = scan(
         &client,
         ScanOptions {

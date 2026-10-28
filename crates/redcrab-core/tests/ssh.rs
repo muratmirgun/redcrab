@@ -175,6 +175,13 @@ fn key_auth_reaches_a_server_only_the_ssh_host_can_see() {
     let dir = TempDir::new(&t);
     let client = connect(through(tunnel(key_file())), pinned(&dir.path("kh")));
     assert_eq!(client.topology_summary(), ["via SSH tunnel@127.0.0.1:2222"]);
+    assert!(
+        client
+            .location()
+            .ends_with(" via SSH tunnel@127.0.0.1:2222 · db0"),
+        "{}",
+        client.location()
+    );
     let local = client.ssh_tunnel().expect("a tunnel");
     assert!(local.ip().is_loopback());
 

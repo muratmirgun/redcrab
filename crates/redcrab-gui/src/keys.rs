@@ -364,8 +364,7 @@ impl KeyBrowser {
         };
         let client = self.client.clone();
         let name = format::bytes_inline(&key).into_owned();
-        let config = client.config();
-        let location = format!("{} · db{}", config.name, config.db);
+        let location = client.location();
         let view = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let view = view.clone();
