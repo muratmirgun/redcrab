@@ -454,6 +454,7 @@ mod tests {
         assert!(history.add("GET a"), "only consecutive duplicates collapse");
         assert!(!history.add("AUTH s3cret"));
         assert!(!history.add("CONFIG SET requirepass s3cret"));
+        assert!(!history.add("HSET oauth:github access_token gho_xyz"));
         assert_eq!(entries(&history), ["GET a", "SET a 1", "GET a"]);
     }
 

@@ -134,8 +134,8 @@ directory, readable by its owner only. Commands that carry credentials are never
 `AUTH`, `HELLO ... AUTH`, `ACL SETUSER`, `CONFIG SET` of `requirepass`, `masterauth` and
 the like, `MIGRATE ... AUTH`, `MODULE LOAD` with arguments, scripts (`EVAL`,
 `SCRIPT LOAD`, `FUNCTION LOAD`) that mention any of these, and any line with an argument
-that looks like a password or a secret (which also keeps out harmless lines such as
-`HGET user:1 password_hint`).
+that looks like a password, a secret or a token (`access_token`, `bearer`, ...; which
+also keeps out harmless lines such as `HGET user:1 password_hint` or `SET tokens:count 1`).
 
 ## Console
 

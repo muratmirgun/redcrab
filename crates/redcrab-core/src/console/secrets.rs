@@ -89,13 +89,19 @@ fn script_with_credentials(body: &[u8]) -> bool {
 /// masterauth, masteruser, tls-key-file-pass, tls-client-key-file-pass,
 /// auth-pass, auth-user, sentinel-pass, sentinel-user, Valkey's
 /// primaryauth and primaryuser (its names for masterauth and masteruser),
-/// and whatever a newer server names alike.
+/// a module's `*-token` or `*-key` settings, and whatever a newer server
+/// names alike.
 fn credential_parameter(name: &[u8]) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "pass",
         "auth",
         "secret",
+        "token",
+        "credential",
+        "api-key",
+        "apikey",
+        "api_key",
         "masteruser",
         "primaryuser",
         "sentinel-user",
@@ -107,13 +113,15 @@ fn credential_parameter(name: &[u8]) -> bool {
 /// An argument that is, or names, a credential in any command, including
 /// module commands this version does not know: the keywords AUTH and
 /// AUTH2, the short field names `pass` and `pw`, anything mentioning a
-/// password or a secret (`password`, `passwd`, `pwd`, `requirepass`,
-/// `auth-pass`, `client_secret`, `api-key`, ...), and URLs with credentials
+/// password, a secret or a token (`password`, `passwd`, `pwd`,
+/// `requirepass`, `auth-pass`, `client_secret`, `api-key`, `access_token`,
+/// `bearer`, `credentials`, `session_key`, ...), and URLs with credentials
 /// (`redis://user:pw@host`). `pass` and `pw` only as whole words: as parts
 /// they are in too many words (`compass`, `bypass`, `pwm`).
 ///
-/// This also drops harmless lines such as `HGET user:1 password_hint`;
-/// losing those from the history is the price of never keeping a real one.
+/// This also drops harmless lines such as `HGET user:1 password_hint` or
+/// `SET tokens:count 1`; losing those from the history is the price of
+/// never keeping a real one.
 pub(crate) fn credential_like(arg: &[u8]) -> bool {
     let lower = arg.to_ascii_lowercase();
     ["auth", "auth2", "pass", "pw"]
@@ -134,6 +142,14 @@ pub(crate) fn credential_like(arg: &[u8]) -> bool {
             "api_key",
             "private-key",
             "private_key",
+            // OAuth, API and session tokens: `token`, `access_token`,
+            // `github-token`, `Bearer`, `session_key`.
+            "token",
+            "bearer",
+            "credential",
+            "session_key",
+            "session-key",
+            "sessionkey",
         ]
         .iter()
         .any(|part| contains(&lower, part.as_bytes()))
@@ -354,6 +370,18 @@ mod tests {
             "HSET user:1 Pass hunter2",
             "HSET user:1 pw hunter2",
             "HMSET db host h user u pass hunter2",
+            // Tokens of every kind.
+            "HSET svc auth_token abc123",
+            "SET github_token ghp_abc",
+            "HSET oauth:github access_token gho_xyz",
+            "HSET oauth:github refresh-token r1",
+            "SET token abc",
+            "HSET cfg bearer xyz",
+            "HSET cfg Authorization \"Bearer xyz\"",
+            "HSET cfg credentials s3cret",
+            "HSET web session_key k1",
+            "CONFIG SET search.api-token abc",
+            "CONFIG SET mymod.api-key abc",
         ] {
             assert!(line(typed), "{typed}");
         }
