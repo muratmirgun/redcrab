@@ -495,7 +495,8 @@ impl ValuePanel {
     /// and JSON encoding take a while for big values: off the UI thread),
     /// then sends it. `unchanged` runs if it would change nothing; `row`
     /// says it is the open row's save. Saving shows meanwhile, and a second
-    /// save waits for this one.
+    /// save waits for this one. The change is sent even if the user moved
+    /// to another key meanwhile: Save was pressed for this one.
     fn encode_and_send(
         &mut self,
         encode: impl FnOnce() -> anyhow::Result<Option<Mutation>> + Send + 'static,
@@ -506,18 +507,24 @@ impl ValuePanel {
     ) {
         self.saving = true;
         cx.notify();
-        let client = self.client.clone();
+        let (client, key) = (self.client.clone(), self.key.clone());
         cx.spawn_in(window, async move |this, cx| {
             let encoded = cx
                 .background_executor()
                 .spawn(async move { encode() })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                this.saving = false;
+                // Another key's save may be on its way by now.
+                let shown = this.key == key;
+                if shown {
+                    this.saving = false;
+                }
                 match encoded {
                     Ok(Some(mutation)) => {
-                        this.saving_row = row;
-                        this.send(client, mutation, window, cx);
+                        if shown {
+                            this.saving_row = row;
+                        }
+                        this.dispatch(client, mutation, window, cx);
                     }
                     Ok(None) => unchanged(this),
                     Err(err) => window.push_notification(
@@ -557,7 +564,21 @@ impl ValuePanel {
         if self.saving {
             return;
         }
-        self.saving = true;
+        self.dispatch(client, mutation, window, cx);
+    }
+
+    /// [`Self::send`] without waiting for a save on its way: a change to
+    /// the key shown holds up further saves until it is answered.
+    fn dispatch(
+        &mut self,
+        client: Client,
+        mutation: Mutation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.key.as_ref() == Some(mutation.key()) {
+            self.saving = true;
+        }
         cx.notify();
         let request = mutation.clone().send(&client);
         cx.spawn_in(window, async move |this, cx| {
