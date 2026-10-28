@@ -15,6 +15,7 @@ pub mod format;
 pub mod formats;
 pub mod progress;
 mod runtime;
+pub mod server;
 pub mod settings;
 pub mod ssh;
 pub mod store;
@@ -26,7 +27,7 @@ pub mod viewer;
 pub use client::{
     COUNT_EXACT_MAX, Client, ConnectOptions, ConsoleSession, DELETE_BATCH, DbInfo, DeleteProgress,
     DeleteStats, EditError, Key, ListEnd, NewValue, ReadOnlyError, Removed, ScanEvent, ScanOptions,
-    ScanProgress, ServerInfo, key_slot,
+    ScanProgress, ServerInfo, ServerNode, key_slot,
 };
 pub use config::{
     ConfigField, ConnectionConfig, Environment, HostKeyPolicy, InvalidConfig, SshAuth, SshConfig,

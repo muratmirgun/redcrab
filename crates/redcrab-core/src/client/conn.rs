@@ -70,6 +70,15 @@ impl Conn {
         }
     }
 
+    /// `host:port` of a cluster primary's connection; `None` for the
+    /// others.
+    pub(crate) fn address(&self) -> Option<String> {
+        match self {
+            Conn::ClusterNode(node) => Some(node.address()),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_cluster(&self) -> bool {
         matches!(self, Conn::Cluster(_) | Conn::ClusterNode(_))
     }

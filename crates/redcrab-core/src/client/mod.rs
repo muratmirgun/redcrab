@@ -18,6 +18,7 @@ mod databases;
 mod edit;
 mod keys;
 mod sentinel;
+mod server;
 mod values;
 
 use std::{
@@ -41,6 +42,7 @@ pub use self::console::ConsoleSession;
 pub use self::databases::DbInfo;
 pub(crate) use self::edit::score_arg;
 pub use self::edit::{EditError, ListEnd, MAX_TTL_SECS, NewValue, Removed, check_stream_id};
+pub use self::server::ServerNode;
 use self::{cluster::Cluster, connector::Connector, sentinel::Sentinel};
 use crate::{
     commands::{CommandClass, READ_ONLY_SCRIPTS},
