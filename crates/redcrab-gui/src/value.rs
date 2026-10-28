@@ -346,7 +346,7 @@ impl ValuePanel {
         };
         let edited = text.editor.read(cx).value();
         match loaded.save_text(&text.edit, &edited) {
-            Ok(Some(mutation)) => self.send(mutation, window, cx),
+            Ok(Some(mutation)) => self.send(self.client.clone(), mutation, window, cx),
             Ok(None) => {
                 text.dirty = false;
                 cx.notify();
@@ -372,7 +372,7 @@ impl ValuePanel {
             .map(|name| name.read(cx).value());
         // The key comes from the loaded value, which follows renames.
         match loaded.save_row(&row.edit, &value, name.as_deref()) {
-            Ok(Some(mutation)) => self.send(mutation, window, cx),
+            Ok(Some(mutation)) => self.send(self.client.clone(), mutation, window, cx),
             Ok(None) => {
                 row.text.dirty = false;
                 row.name_dirty = false;
@@ -392,15 +392,26 @@ impl ValuePanel {
         }
     }
 
-    /// Sends a change, then shows it. A change refused because what it
-    /// writes exists asks whether to replace it.
-    fn send(&mut self, mutation: Mutation, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sends a change on `client`, then shows it. A change refused because
+    /// what it writes exists asks whether to replace it.
+    ///
+    /// `client` is the connection the change was made for: the panel's when
+    /// the user acts, the one captured when a question was asked for one
+    /// confirmed later. The panel may have moved to another database while
+    /// the question was open; the change still goes where the user saw the
+    /// value, and its result is then reported as such ([`Self::elsewhere`]).
+    fn send(
+        &mut self,
+        client: Client,
+        mutation: Mutation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.saving {
             return;
         }
         self.saving = true;
         cx.notify();
-        let client = self.client.clone();
         let request = mutation.clone().send(&client);
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
@@ -409,7 +420,7 @@ impl ValuePanel {
                 if client.same_connection(&this.client) {
                     match result {
                         Ok(outcome) => this.done(mutation, outcome, window, cx),
-                        Err(err) => this.refused(mutation, err, window, cx),
+                        Err(err) => this.refused(client, mutation, err, window, cx),
                     }
                 } else {
                     Self::elsewhere(&client, &mutation, result, window, cx);
@@ -443,8 +454,12 @@ impl ValuePanel {
         window.push_notification(note, cx);
     }
 
+    /// Shows a change `client` refused. One refused because what it writes
+    /// exists asks whether to replace it, there: on `client`, even if the
+    /// panel moves to another database while the question is open.
     fn refused(
         &mut self,
+        client: Client,
         mutation: Mutation,
         err: anyhow::Error,
         window: &mut Window,
@@ -459,6 +474,7 @@ impl ValuePanel {
             window.open_alert_dialog(cx, move |alert, _, _| {
                 let this = this.clone();
                 let again = again.clone();
+                let client = client.clone();
                 alert
                     .title("Replace?")
                     .description(SharedString::from(question.clone()))
@@ -466,8 +482,8 @@ impl ValuePanel {
                     .ok_variant(ButtonVariant::Danger)
                     .show_cancel(true)
                     .on_ok(move |_, window, cx| {
-                        let again = again.clone();
-                        this.update(cx, |this, cx| this.send(again, window, cx))
+                        let (client, again) = (client.clone(), again.clone());
+                        this.update(cx, |this, cx| this.send(client, again, window, cx))
                             .ok();
                         true
                     })
@@ -742,7 +758,9 @@ impl ValuePanel {
         cx.notify();
     }
 
-    /// Asks before deleting the picked rows.
+    /// Asks before deleting the picked rows. They are deleted where they
+    /// were picked, even if the panel moves to another database while the
+    /// question is open.
     fn request_delete_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(loaded) = self.loaded.as_ref() else {
             return;
@@ -756,9 +774,11 @@ impl ValuePanel {
             n => format!("these {} rows", format::count(n as u64)),
         };
         let this = cx.entity().downgrade();
+        let client = self.client.clone();
         window.open_alert_dialog(cx, move |alert, _, _| {
             let this = this.clone();
             let mutation = mutation.clone();
+            let client = client.clone();
             alert
                 .title("Delete?")
                 .description(SharedString::from(format!("Delete {what} from the value?")))
@@ -766,8 +786,8 @@ impl ValuePanel {
                 .ok_variant(ButtonVariant::Danger)
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
-                    let mutation = mutation.clone();
-                    this.update(cx, |this, cx| this.send(mutation, window, cx))
+                    let (client, mutation) = (client.clone(), mutation.clone());
+                    this.update(cx, |this, cx| this.send(client, mutation, window, cx))
                         .ok();
                     true
                 })
