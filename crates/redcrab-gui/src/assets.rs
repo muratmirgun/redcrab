@@ -18,7 +18,14 @@ gpui_kit::assets::icon_assets!(
         Lock,
         ShieldAlert,
         Network,
-        Pencil
+        Pencil,
+        AppWindow,
+        CircleArrowDown,
+        Command,
+        Plug,
+        Power,
+        Save,
+        SunMoon
     ]
 );
 
@@ -47,5 +54,54 @@ impl AssetSource for AppAssets {
             paths.push(LOGO.into());
         }
         Ok(paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `icons/square-terminal.svg` for `SquareTerminal`, as the icon set
+    /// names its files.
+    fn path(name: &str) -> String {
+        let mut file = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                file.push('-');
+            }
+            file.push(c.to_ascii_lowercase());
+        }
+        format!("icons/{file}.svg")
+    }
+
+    /// Every icon the app names in its source is one it can load: the
+    /// component library's set covers only some, and a missing one draws
+    /// nothing and logs an error on every frame.
+    #[test]
+    fn every_icon_the_app_uses_is_embedded() {
+        assert_eq!(
+            path("SquareTerminal"),
+            gpui_kit::assets::IconName::SquareTerminal.path().as_ref()
+        );
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let file = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            for prefix in ["IconName::", "Lucide::"] {
+                for (at, _) in file.match_indices(prefix) {
+                    let name: String = file[at + prefix.len()..]
+                        .chars()
+                        .take_while(char::is_ascii_alphanumeric)
+                        .collect();
+                    let path = path(&name);
+                    if !name.is_empty() && !matches!(AppAssets.load(&path), Ok(Some(_))) {
+                        missing.push(name);
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "add these to ExtraIcons: {missing:?}");
     }
 }
