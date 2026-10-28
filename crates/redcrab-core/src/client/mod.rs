@@ -9,6 +9,7 @@
 //! through `sentinel`.
 
 mod admin;
+mod analysis;
 mod bulk;
 mod cluster;
 mod conn;
@@ -35,6 +36,7 @@ use redis::{
     cmd,
 };
 
+pub use self::analysis::AnalysisProgress;
 pub use self::bulk::{COUNT_EXACT_MAX, DELETE_BATCH, DeleteProgress, DeleteStats, ScanProgress};
 pub use self::cluster::key_slot;
 pub(crate) use self::conn::Conn;

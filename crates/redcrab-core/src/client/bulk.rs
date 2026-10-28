@@ -251,7 +251,7 @@ impl Client {
 /// Distinct keys by their 64-bit hash, so that remembering a key costs a
 /// hash, not the key. Two keys sharing a hash would count once; among two
 /// million keys that happens with a chance of about one in ten million.
-struct Distinct {
+pub(crate) struct Distinct {
     hashes: HashTable<u64>,
     hasher: foldhash::fast::RandomState,
     count: u64,
@@ -270,11 +270,12 @@ impl Default for Distinct {
 }
 
 impl Distinct {
-    fn insert(&mut self, key: &[u8]) {
+    /// Counts `key` unless it was seen; `false` when it was.
+    pub(crate) fn insert(&mut self, key: &[u8]) -> bool {
         use std::hash::BuildHasher as _;
         let hash = self.hasher.hash_one(key);
         if self.hashes.find(hash, |&h| h == hash).is_some() {
-            return;
+            return false;
         }
         self.count += 1;
         if self.hashes.len() < COUNT_EXACT_MAX {
@@ -284,10 +285,11 @@ impl Distinct {
             // one SCAN returns twice is counted twice.
             self.exact = false;
         }
+        true
     }
 
     /// Forgets the keys but keeps the count, for the next node.
-    fn forget(&mut self) {
+    pub(crate) fn forget(&mut self) {
         self.hashes.clear();
     }
 

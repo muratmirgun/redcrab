@@ -43,6 +43,9 @@ pub const READ_ONLY_DB: u32 = 14;
 /// Owned by `read_only::console_refuses_admin_commands`: an empty database
 /// for commands that would act on a whole one if the gate let them through.
 pub const SCRATCH_DB: u32 = 12;
+/// Owned by `analysis::a_database_is_measured_key_by_key`, which flushes it
+/// and analyzes the whole of it.
+pub const ANALYSIS_DB: u32 = 11;
 
 /// Starts an integration test, or skips it unless `REDCRAB_IT=1`:
 /// `let Some(t) = it!() else { return };`. The test's name comes from the

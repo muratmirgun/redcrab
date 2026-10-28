@@ -4,6 +4,7 @@
 //! functions spawn onto it and hand back plain futures, so callers can await
 //! them from any executor (GPUI's, a TUI loop, or tokio itself).
 
+pub mod analysis;
 pub mod browser;
 pub mod bulk;
 mod client;
@@ -25,9 +26,9 @@ mod value;
 pub mod viewer;
 
 pub use client::{
-    COUNT_EXACT_MAX, Client, ConnectOptions, ConsoleSession, DELETE_BATCH, DbInfo, DeleteProgress,
-    DeleteStats, EditError, Key, ListEnd, NewValue, ReadOnlyError, Removed, ScanEvent, ScanOptions,
-    ScanProgress, ServerInfo, ServerNode, key_slot,
+    AnalysisProgress, COUNT_EXACT_MAX, Client, ConnectOptions, ConsoleSession, DELETE_BATCH,
+    DbInfo, DeleteProgress, DeleteStats, EditError, Key, ListEnd, NewValue, ReadOnlyError, Removed,
+    ScanEvent, ScanOptions, ScanProgress, ServerInfo, ServerNode, key_slot,
 };
 pub use config::{
     ConfigField, ConnectionConfig, Environment, HostKeyPolicy, InvalidConfig, SshAuth, SshConfig,
