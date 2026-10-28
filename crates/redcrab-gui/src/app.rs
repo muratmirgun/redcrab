@@ -20,7 +20,7 @@ use redcrab_core::{Client, ConnectionConfig, Environment, format, settings::Appe
 
 use crate::{
     DeleteKey, FocusSearch, NewKey, NewWindow, OpenSettings, Quit, Refresh, SaveValue, ShowKeys,
-    ShowServer, ToggleConsole,
+    ShowMemory, ShowServer, ToggleConsole,
     connect::{ConnectEvent, ConnectView, Start},
     palette::{self, PaletteCommand},
     settings, style,
@@ -130,6 +130,17 @@ impl RedcrabApp {
                     commands.push(
                         action("View", "Show Keys", Box::new(ShowKeys), Lucide::Key)
                             .keywords(&["browser", "tree"]),
+                    );
+                }
+                if shown != View::Memory {
+                    commands.push(
+                        action(
+                            "View",
+                            "Show Memory",
+                            Box::new(ShowMemory),
+                            Lucide::MemoryStick,
+                        )
+                        .keywords(&["analyze", "analysis", "big keys", "biggest", "size"]),
                     );
                 }
                 if shown != View::Server {

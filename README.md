@@ -215,6 +215,22 @@ On a cluster it looks at one primary at a time, picked at the top right. Reset a
 are refused on a read-only connection, and they ask first. A user whose ACL lacks
 `INFO`, `SLOWLOG` or `CLIENT` sees why instead of the figures.
 
+## Memory
+
+The **Memory** tab (<kbd>⌘3</kbd>) finds what takes the memory: it walks the keys with
+`SCAN` and measures each with `MEMORY USAGE` (`TYPE` and `PTTL` in the same round trip),
+when you click **Analyze**, never on its own. It shows
+
+- the total, the keys, and how much of the memory is in keys without a TTL;
+- the memory per type, and per key prefix, split on the connection's separator, three
+  levels deep: click a prefix to look into it;
+- the 100 biggest keys: click one to open it in the keys view.
+
+On a large or busy server, measure **1 key in 10** or **1 in 100**: the totals are then
+estimates (marked ≈), the measured figures times the sample. A cluster is walked
+primary by primary. It only reads, so it works on a read-only connection; the user needs
+the `MEMORY` command.
+
 ## Command palette and settings
 
 <kbd>⌘K</kbd> opens the command palette: everything the window can do, with its

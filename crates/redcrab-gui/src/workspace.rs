@@ -21,9 +21,11 @@ use gpui_kit::{
 use redcrab_core::{Client, DbInfo, Key, ServerInfo};
 
 use crate::{
-    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ShowKeys, ShowServer, ToggleConsole,
+    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ShowKeys, ShowMemory, ShowServer,
+    ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
+    memory::{MemoryEvent, MemoryView},
     server::ServerView,
     shortcuts,
     value::{ValueEvent, ValuePanel, ask_to_discard_edits},
@@ -43,15 +45,18 @@ pub enum View {
     Keys,
     /// The server tools.
     Server,
+    /// The memory analysis.
+    Memory,
 }
 
 impl View {
-    pub const ALL: [Self; 2] = [Self::Keys, Self::Server];
+    pub const ALL: [Self; 3] = [Self::Keys, Self::Server, Self::Memory];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Keys => "Keys",
             Self::Server => "Server",
+            Self::Memory => "Memory",
         }
     }
 }
@@ -69,6 +74,8 @@ pub struct Workspace {
     view: View,
     /// Made the first time the server tools are shown.
     server: Option<Entity<ServerView>>,
+    /// Made the first time the memory analysis is shown.
+    memory: Option<Entity<MemoryView>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
@@ -142,6 +149,7 @@ impl Workspace {
             show_console: false,
             view: View::Keys,
             server: None,
+            memory: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             _poll: poll,
@@ -284,6 +292,9 @@ impl Workspace {
         if let Some(server) = &self.server {
             server.update(cx, |server, cx| server.set_client(client.clone(), cx));
         }
+        if let Some(memory) = &self.memory {
+            memory.update(cx, |memory, cx| memory.set_client(client.clone(), cx));
+        }
         self._poll = Self::poll(&client, cx);
         cx.emit(WorkspaceEvent::ClientChanged);
         cx.notify();
@@ -304,6 +315,17 @@ impl Workspace {
             let client = self.client.clone();
             self.server = Some(cx.new(|cx| ServerView::new(client, window, cx)));
         }
+        if view == View::Memory && self.memory.is_none() {
+            let memory = cx.new(|_| MemoryView::new(self.client.clone()));
+            self._subscriptions.push(cx.subscribe_in(
+                &memory,
+                window,
+                |this, _, event, window, cx| match event {
+                    MemoryEvent::OpenKey(key) => this.open_key(key.clone(), window, cx),
+                },
+            ));
+            self.memory = Some(memory);
+        }
         if let Some(server) = &self.server {
             server.update(cx, |server, cx| server.set_shown(view == View::Server, cx));
         }
@@ -320,6 +342,18 @@ impl Workspace {
 
     fn show_server(&mut self, _: &ShowServer, window: &mut Window, cx: &mut Context<Self>) {
         self.show(View::Server, window, cx);
+    }
+
+    fn show_memory(&mut self, _: &ShowMemory, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Memory, window, cx);
+    }
+
+    /// Shows `key` in the keys view: selected in the tree (added to it if
+    /// the filter left it out) and its value loaded.
+    pub fn open_key(&mut self, key: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Keys, window, cx);
+        self.keys.update(cx, |keys, cx| keys.add_key(&key, cx));
+        self.show_key(key.into(), window, cx);
     }
 
     /// ⌘R: what is shown, read again.
@@ -455,9 +489,12 @@ impl Render for Workspace {
                 div().size_full().child(above).into_any_element()
             }
         };
-        let main = match (self.view, &self.server) {
-            (View::Server, Some(server)) => {
+        let main = match (self.view, &self.server, &self.memory) {
+            (View::Server, Some(server), _) => {
                 with_console("server-console", server.clone().into_any_element())
+            }
+            (View::Memory, _, Some(memory)) => {
+                with_console("memory-console", memory.clone().into_any_element())
             }
             _ => h_resizable("workspace")
                 .child(
@@ -492,6 +529,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_key))
             .on_action(cx.listener(Self::show_keys))
             .on_action(cx.listener(Self::show_server))
+            .on_action(cx.listener(Self::show_memory))
             .child(
                 TabBar::new("views")
                     .underline()
@@ -506,6 +544,7 @@ impl Render for Workspace {
                             .icon(match view {
                                 View::Keys => gpui_kit::assets::IconName::Key,
                                 View::Server => gpui_kit::assets::IconName::Server,
+                                View::Memory => gpui_kit::assets::IconName::MemoryStick,
                             })
                             .aria_label(format!(
                                 "{} ({})",

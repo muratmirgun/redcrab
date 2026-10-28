@@ -25,7 +25,8 @@ gpui_kit::assets::icon_assets!(
         Plug,
         Power,
         Save,
-        SunMoon
+        SunMoon,
+        MemoryStick
     ]
 );
 

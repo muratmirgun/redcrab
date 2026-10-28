@@ -11,6 +11,7 @@ mod connect;
 mod console;
 mod edit;
 mod keys;
+mod memory;
 mod palette;
 mod server;
 mod settings;
@@ -51,6 +52,7 @@ gpui_kit::actions!(
         OpenSettings,
         ShowKeys,
         ShowServer,
+        ShowMemory,
     ]
 );
 
