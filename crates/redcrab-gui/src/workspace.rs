@@ -253,13 +253,15 @@ impl Workspace {
             .update(cx, |keys, cx| keys.focus_search(window, cx));
     }
 
+    /// ⌘⌫: asks before deleting the rows picked in the value, or else the
+    /// key shown.
     fn delete_key(&mut self, _: &DeleteKey, window: &mut Window, cx: &mut Context<Self>) {
         // Read-only connections have no delete (core would refuse it anyway).
         if self.client.config().read_only {
             return;
         }
         self.value
-            .update(cx, |value, cx| value.request_delete(window, cx));
+            .update(cx, |value, cx| value.request_delete(true, window, cx));
     }
 
     fn save_value(&mut self, _: &SaveValue, window: &mut Window, cx: &mut Context<Self>) {

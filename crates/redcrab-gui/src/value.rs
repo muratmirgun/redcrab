@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, ops::Range, rc::Rc, time::Duration};
+use std::{collections::BTreeSet, ops::Range, rc::Rc};
 
 use gpui_kit::{
     App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FontWeight,
@@ -95,7 +95,6 @@ pub struct ValuePanel {
     picked: BTreeSet<usize>,
     /// The row open in the detail pane (the last one clicked).
     row: Option<RowPane>,
-    confirm_delete: bool,
     /// A change is on its way to the server.
     saving: bool,
     /// The change on its way is the open row's own save: once it lands,
@@ -109,7 +108,6 @@ pub struct ValuePanel {
     scroll: UniformListScrollHandle,
     _load: Option<Task<()>>,
     _more: Option<Task<()>>,
-    _confirm_reset: Option<Task<()>>,
 }
 
 impl EventEmitter<ValueEvent> for ValuePanel {}
@@ -126,14 +124,12 @@ impl ValuePanel {
             text: None,
             picked: BTreeSet::new(),
             row: None,
-            confirm_delete: false,
             saving: false,
             saving_row: false,
             scripts_refused: false,
             scroll: UniformListScrollHandle::new(),
             _load: None,
             _more: None,
-            _confirm_reset: None,
         }
     }
 
@@ -158,7 +154,6 @@ impl ValuePanel {
         self.row = None;
         self.picked.clear();
         self.error = None;
-        self.confirm_delete = false;
         self.loading = true;
         self.loading_more = false;
         self._more = None;
@@ -271,7 +266,6 @@ impl ValuePanel {
         self.row = None;
         self.picked.clear();
         self.error = None;
-        self.confirm_delete = false;
         self.saving = false;
         self.loading = false;
         self.loading_more = false;
@@ -745,47 +739,80 @@ impl ValuePanel {
         }));
     }
 
-    /// First call arms the button; a second within three seconds deletes.
-    pub fn request_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only() {
+    /// Asks before deleting the key shown, naming it and where it is, as
+    /// the key list's "Delete…" does (the header's trash button, ⌘⌫).
+    /// With `rows` (⌘⌫) and rows picked in a collection, it asks about
+    /// deleting those instead: picking rows and pressing ⌘⌫ means them.
+    pub fn request_delete(&mut self, rows: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // A held ⌘⌫ repeats: one question at a time.
+        if self.read_only() || window.has_active_dialog(cx) {
+            return;
+        }
+        if rows && !self.picked.is_empty() && self.rows_editable() {
+            self.request_delete_rows(window, cx);
             return;
         }
         let Some(key) = self.key.clone() else {
             return;
         };
-        if !self.confirm_delete {
-            self.confirm_delete = true;
-            self._confirm_reset = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
-                this.update(cx, |this, cx| {
-                    this.confirm_delete = false;
-                    cx.notify();
-                })
-                .ok();
-            }));
-            cx.notify();
-            return;
-        }
-        self.confirm_delete = false;
+        // Deleted on the connection the key was shown from, even if the
+        // panel moves to another database while the question is open.
         let client = self.client.clone();
+        let name = format::bytes_inline(&key).into_owned();
+        let location = client.location();
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let this = this.clone();
+            let (client, key) = (client.clone(), key.clone());
+            alert
+                .confirm()
+                .title("Delete key?")
+                .description(
+                    v_flex().gap_1().child(name.clone()).child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(location.clone()),
+                    ),
+                )
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let (client, key) = (client.clone(), key.clone());
+                    this.update(cx, |this, cx| this.delete_key(client, key, window, cx))
+                        .ok();
+                    true
+                })
+        });
+    }
+
+    /// Deletes `key` on `client`, and stops showing it if the panel still
+    /// shows it there.
+    fn delete_key(
+        &mut self,
+        client: Client,
+        key: Key,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let request = client.delete(vec![key.clone()]);
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |this, window, cx| {
                 match result {
-                    Ok(_) => {
-                        window.push_notification(
-                            Notification::success(format!(
-                                "Deleted {}",
-                                format::bytes_inline(&key)
-                            )),
-                            cx,
+                    // The panel may have moved to another database
+                    // meanwhile, where a key of that name stays.
+                    Ok(_) if !client.same_connection(&this.client) => {
+                        let note = format!(
+                            "Deleted {} from db{}",
+                            format::bytes_inline(&key),
+                            client.config().db
                         );
-                        // The panel may have moved to another database
-                        // meanwhile, where a key of that name stays.
-                        if !client.same_connection(&this.client) {
-                            return;
-                        }
+                        window.push_notification(Notification::success(note), cx);
+                    }
+                    Ok(_) => {
+                        let note = format!("Deleted {}", format::bytes_inline(&key));
+                        window.push_notification(Notification::success(note), cx);
                         // Only if the deleted key is still the one shown.
                         if this.key.as_ref() == Some(&key) {
                             this.key = None;
@@ -891,6 +918,9 @@ impl ValuePanel {
     /// were picked, even if the panel moves to another database while the
     /// question is open.
     fn request_delete_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         let Some(loaded) = self.loaded.as_ref() else {
             return;
         };
@@ -1155,18 +1185,12 @@ impl ValuePanel {
                 this.child(
                     Button::new("delete")
                         .small()
-                        .map(|b| {
-                            if self.confirm_delete {
-                                b.danger().label("Delete?")
-                            } else {
-                                b.ghost()
-                            }
-                        })
+                        .ghost()
                         .icon(gpui_kit::assets::IconName::Trash)
-                        .tooltip("Delete key (⌘⌫)")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.request_delete(window, cx)),
-                        ),
+                        .tooltip("Delete key…")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.request_delete(false, window, cx)
+                        })),
                 )
             })
     }
