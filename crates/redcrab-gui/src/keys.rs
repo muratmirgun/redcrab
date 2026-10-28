@@ -548,18 +548,25 @@ impl KeyBrowser {
         let created_on = client.clone();
         let on_done: OnDone = Rc::new(
             move |mutation: Mutation, outcome: Outcome, window: &mut Window, cx: &mut App| {
-                window
-                    .push_notification(Notification::success(mutation.done_message(&outcome)), cx);
                 let key = mutation.key().clone();
-                this.update(cx, |this, cx| {
-                    // Only if the list still shows the database the key
-                    // was created in.
-                    if created_on.same_connection(&this.client) {
-                        this.add_key(&key, cx);
-                        cx.emit(KeyEvent::Selected(key));
-                    }
-                })
-                .ok();
+                let here = this
+                    .update(cx, |this, cx| {
+                        // Only if the list still shows the database the key
+                        // was created in.
+                        let here = created_on.same_connection(&this.client);
+                        if here {
+                            this.add_key(&key, cx);
+                            cx.emit(KeyEvent::Selected(key));
+                        }
+                        here
+                    })
+                    .unwrap_or(false);
+                // Created in a database the list has left: say which.
+                let mut note = mutation.done_message(&outcome);
+                if !here {
+                    note.push_str(&format!(" in db{}", created_on.config().db));
+                }
+                window.push_notification(Notification::success(note), cx);
             },
         );
         let form = cx.new(|cx| ChangeForm::new_key(client, on_done, window, cx));
