@@ -31,6 +31,9 @@ serde_json.workspace = true
 gpui-pre-apple = { version = "=0.3.10", optional = true }
 
 [dev-dependencies]
+# GPUI's headless test platform, for the UI tests (update.rs). gpui-kit's
+# own test-support would also pull GPUI Fast into the lock file.
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
 # Renders the app icon sizes for assets/logo/build-icns.sh.
 resvg = { version = "0.46", default-features = false }
 

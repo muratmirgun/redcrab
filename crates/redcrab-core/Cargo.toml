@@ -32,6 +32,11 @@ ring = "0.17"
 # Value formats (formats.rs). Both are in the dependency tree already.
 base64 = "0.22"
 flate2 = "1"
+# Update checks and downloads (update.rs): blocking, on the runtime's
+# blocking pool. rustls with the ring provider this crate already uses, and
+# the platform's trust store, so a TLS-inspecting corporate proxy works.
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+semver = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

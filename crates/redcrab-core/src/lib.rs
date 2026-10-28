@@ -18,6 +18,7 @@ mod runtime;
 pub mod ssh;
 pub mod store;
 mod tree;
+pub mod update;
 mod value;
 pub mod viewer;
 

@@ -32,6 +32,9 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
+    # Mozilla's root certificates (webpki-root-certs), which the update
+    # check's platform verifier carries for systems without a trust store.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MIT-0",

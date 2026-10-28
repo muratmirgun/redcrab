@@ -13,6 +13,7 @@ mod edit;
 mod keys;
 mod shortcuts;
 mod style;
+mod update;
 mod value;
 mod workspace;
 
@@ -99,6 +100,8 @@ fn main() {
             })
             .detach();
 
+            // Before the first window, whose title bar shows the updates.
+            update::init(cx);
             open_main_window(start, cx);
             cx.activate(true);
         });

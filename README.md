@@ -28,6 +28,22 @@ Download a package from [Releases](https://github.com/muratmirgun/redcrab/releas
   protected your PC": **More info**, then **Run anyway**.
 - **Linux:** drawing needs a Vulkan driver (`mesa-vulkan-drivers` on most systems).
 
+### Updates
+
+From 0.2.0 on, redcrab looks for a new release when it starts and once a day after,
+and asks before it installs one: **Install and Restart**, **Later**, or **Skip This
+Version**. The title bar's ⋮ menu checks right away or turns the daily check off;
+`REDCRAB_NO_UPDATE_CHECK=1` turns it off as well. Only the GitHub API is asked, and
+nothing about you or your connections is sent.
+
+An update installs only if `SHA256SUMS` carries the release key's Ed25519 signature
+and the download matches it, so a file swapped on GitHub or on the way is refused.
+The new version replaces the app where it is: `redcrab.app` (which needs a folder you
+can write to, such as Applications, not the disk image), the `.deb` (through
+`pkexec`, which asks for an administrator's password) or the unpacked tarball or
+zip. When it cannot, the dialog links to the download instead. Builds from source
+never look for updates.
+
 ## Why
 
 Existing free clients are Electron or webview apps. redcrab aims to stay instant on

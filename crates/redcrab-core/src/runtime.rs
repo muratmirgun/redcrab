@@ -27,3 +27,20 @@ where
 {
     runtime().spawn(fut).await?
 }
+
+/// Runs `f` on the runtime's blocking pool, for blocking work such as HTTP
+/// downloads and file copies. It starts right away; the returned future
+/// can be awaited from any executor.
+pub(crate) fn blocking<T, F>(f: F) -> impl Future<Output = Result<T>> + Send + 'static
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let task = runtime().spawn_blocking(f);
+    async move { task.await? }
+}
+
+/// Runs `f` on the runtime's blocking pool, without waiting for it.
+pub(crate) fn detach_blocking(f: impl FnOnce() + Send + 'static) {
+    drop(runtime().spawn_blocking(f));
+}

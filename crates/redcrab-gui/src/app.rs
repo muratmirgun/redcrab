@@ -4,7 +4,9 @@ use gpui_kit::{
     component::{
         ActiveTheme as _, Icon, IconName, Sizable as _, Theme, ThemeMode, TitleBar,
         button::{Button, ButtonVariants as _},
-        h_flex, v_flex,
+        h_flex,
+        menu::{DropdownMenu as _, PopupMenuItem},
+        v_flex,
     },
     div,
     prelude::FluentBuilder as _,
@@ -15,6 +17,7 @@ use redcrab_core::{Client, ConnectionConfig, Environment};
 use crate::{
     connect::{ConnectEvent, ConnectView, Start},
     style,
+    update::Updater,
     workspace::{Workspace, WorkspaceEvent},
 };
 
@@ -39,6 +42,8 @@ enum Screen {
 pub struct RedcrabApp {
     screen: Screen,
     _subscription: Option<Subscription>,
+    /// The title bar follows the updater, in a build that has one.
+    _updates: Option<Subscription>,
 }
 
 impl RedcrabApp {
@@ -47,6 +52,8 @@ impl RedcrabApp {
         Self {
             screen,
             _subscription: Some(subscription),
+            _updates: Updater::global(cx)
+                .map(|updater| cx.observe(&updater, |_, _, cx| cx.notify())),
         }
     }
 
@@ -96,6 +103,77 @@ impl RedcrabApp {
         cx.notify();
     }
 
+    /// The title bar's update controls: a button while a release is
+    /// offered or installing, which opens the update dialog here, and a
+    /// menu to look for one now or turn the daily check off.
+    fn update_controls(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let updater = Updater::global(cx)?;
+        let handle = window.window_handle();
+        let (button, busy, automatic) = {
+            let updater = updater.read(cx);
+            (updater.button(), updater.busy(), updater.automatic())
+        };
+        Some(
+            h_flex()
+                .gap_1()
+                .when_some(button, |this, (label, loading)| {
+                    let updater = updater.clone();
+                    this.child(
+                        Button::new("update")
+                            .primary()
+                            .xsmall()
+                            .icon(gpui_kit::assets::IconName::CircleArrowDown)
+                            .label(label)
+                            .loading(loading)
+                            .on_click(move |_, _, cx| {
+                                updater.update(cx, |updater, cx| updater.offer(Some(handle), cx));
+                            }),
+                    )
+                })
+                .child(
+                    Button::new("app-menu")
+                        .ghost()
+                        .small()
+                        .icon(gpui_kit::assets::IconName::EllipsisVertical)
+                        .tooltip("More")
+                        .dropdown_menu(move |menu, _, _| {
+                            let check = updater.clone();
+                            let toggle = updater.clone();
+                            menu.item(
+                                PopupMenuItem::new("Check for Updates…")
+                                    .disabled(busy)
+                                    .on_click(move |_, _, cx| {
+                                        check.update(cx, |updater, cx| {
+                                            updater.check(Some(handle), cx)
+                                        });
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Check Automatically")
+                                    .checked(automatic)
+                                    .on_click(move |_, _, cx| {
+                                        toggle.update(cx, |updater, cx| {
+                                            updater.set_automatic(!automatic, cx)
+                                        });
+                                    }),
+                            )
+                            .separator()
+                            .item(
+                                PopupMenuItem::new(format!(
+                                    "redcrab {}",
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .disabled(true),
+                            )
+                        }),
+                ),
+        )
+    }
+
     fn toggle_theme(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let mode = if cx.theme().is_dark() {
             ThemeMode::Light
@@ -107,7 +185,8 @@ impl RedcrabApp {
 }
 
 impl Render for RedcrabApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let updates = self.update_controls(window, cx);
         let theme = cx.theme();
         let connection = match &self.screen {
             Screen::Workspace(workspace) => {
@@ -175,7 +254,7 @@ impl Render for RedcrabApp {
                             }),
                     )
                     .child(
-                        h_flex().pr_2().child(
+                        h_flex().pr_2().gap_1().children(updates).child(
                             Button::new("theme")
                                 .ghost()
                                 .small()
