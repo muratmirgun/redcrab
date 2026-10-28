@@ -711,6 +711,8 @@ impl KeyBrowser {
         self.meta.remove(&node);
         self.selected = Some((node, RowKind::Key));
         self.reselect = None;
+        // A rename is `remove_key` then this: both keep the count in step.
+        self.recount();
         self.rows_dirty = true;
         self.selected_index()
     }

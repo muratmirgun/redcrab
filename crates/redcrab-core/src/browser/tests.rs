@@ -384,6 +384,15 @@ fn adds_created_keys_open_and_selected() {
     assert_eq!(browser.add_key(b"b\xff"), Some(5));
     assert_eq!(browser.row_view(5).unwrap().name, "b\\xff");
 
+    // The finished scan's count follows: a rename keeps it, a new key
+    // adds one.
+    assert_eq!(browser.key_count(), 4);
+    assert!(
+        browser.status_text().starts_with("4 keys"),
+        "{}",
+        browser.status_text()
+    );
+
     // Its type and TTL are fetched again once forgotten.
     let len = browser.len();
     let request = browser.take_meta_request(0..len).unwrap();
@@ -393,6 +402,36 @@ fn adds_created_keys_open_and_selected() {
     browser.forget_meta(b"unknown");
     let request = browser.take_meta_request(0..len).unwrap();
     assert_eq!(request.keys, [Key::from(&b"user:1"[..])]);
+}
+
+#[test]
+fn renames_and_new_keys_keep_the_count_of_a_finished_scan() {
+    let mut browser = KeyBrowser::new(b':', None);
+    scan(&mut browser, "", &["a", "b", "c"]);
+    assert!(browser.status_text().starts_with("3 keys"));
+    // A rename, as the workspace applies it.
+    browser.remove_key(b"b");
+    browser.add_key(b"d");
+    assert!(
+        browser.status_text().starts_with("3 keys"),
+        "{}",
+        browser.status_text()
+    );
+    browser.add_key(b"e");
+    assert_eq!(browser.key_count(), 4);
+    assert!(
+        browser.status_text().starts_with("4 keys"),
+        "{}",
+        browser.status_text()
+    );
+    // Filtered: the noun changes, the count still follows.
+    scan(&mut browser, "x*", &["x1", "x2"]);
+    browser.add_key(b"x3");
+    assert!(
+        browser.status_text().starts_with("3 matches"),
+        "{}",
+        browser.status_text()
+    );
 }
 
 #[test]
