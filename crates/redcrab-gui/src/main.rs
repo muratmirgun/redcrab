@@ -12,6 +12,7 @@ mod console;
 mod edit;
 mod keys;
 mod palette;
+mod server;
 mod settings;
 mod shortcuts;
 mod style;
@@ -48,6 +49,8 @@ gpui_kit::actions!(
         ClearConsole,
         OpenPalette,
         OpenSettings,
+        ShowKeys,
+        ShowServer,
     ]
 );
 

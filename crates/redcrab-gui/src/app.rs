@@ -19,13 +19,13 @@ use gpui_kit::{
 use redcrab_core::{Client, ConnectionConfig, Environment, format, settings::Appearance, store};
 
 use crate::{
-    DeleteKey, FocusSearch, NewKey, NewWindow, OpenSettings, Quit, Refresh, SaveValue,
-    ToggleConsole,
+    DeleteKey, FocusSearch, NewKey, NewWindow, OpenSettings, Quit, Refresh, SaveValue, ShowKeys,
+    ShowServer, ToggleConsole,
     connect::{ConnectEvent, ConnectView, Start},
     palette::{self, PaletteCommand},
     settings, style,
     update::Updater,
-    workspace::{Workspace, WorkspaceEvent},
+    workspace::{View, Workspace, WorkspaceEvent},
 };
 
 /// Each window's app view, so that the app-wide palette action reaches the
@@ -125,6 +125,21 @@ impl RedcrabApp {
                 let action = |group, label, action: Box<dyn gpui_kit::Action>, icon| {
                     PaletteCommand::action(group, label, action, target.clone(), window).icon(icon)
                 };
+                let shown = workspace.read(cx).view();
+                if shown != View::Keys {
+                    commands.push(
+                        action("View", "Show Keys", Box::new(ShowKeys), Lucide::Key)
+                            .keywords(&["browser", "tree"]),
+                    );
+                }
+                if shown != View::Server {
+                    commands.push(
+                        action("View", "Show Server", Box::new(ShowServer), Lucide::Server)
+                            .keywords(&[
+                                "info", "slowlog", "slow log", "clients", "memory", "stats",
+                            ]),
+                    );
+                }
                 commands.extend([
                     action("Keys", "Refresh Keys", Box::new(Refresh), Lucide::RefreshCw)
                         .keywords(&["reload", "scan", "rescan"]),

@@ -27,7 +27,9 @@ pub struct ServerNode {
 impl Client {
     /// The servers the tools can look at: this one, or each primary of a
     /// cluster.
-    pub fn server_nodes(&self) -> impl Future<Output = Result<Vec<ServerNode>>> + Send + 'static {
+    pub fn server_nodes(
+        &self,
+    ) -> impl Future<Output = Result<Vec<ServerNode>>> + Send + 'static + use<> {
         let conn = self.conn.clone();
         let read_only = self.config.read_only;
         let single = self.location();
@@ -61,7 +63,7 @@ impl ServerNode {
         &self.label
     }
 
-    pub fn info(&self) -> impl Future<Output = Result<Info>> + Send + 'static {
+    pub fn info(&self) -> impl Future<Output = Result<Info>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         spawn(async move {
             let text: String = cmd("INFO")
@@ -74,7 +76,10 @@ impl ServerNode {
 
     /// The `count` newest entries of the slow log, and how it is set up.
     /// The settings are left out where CONFIG GET is not allowed.
-    pub fn slow_log(&self, count: usize) -> impl Future<Output = Result<SlowLog>> + Send + 'static {
+    pub fn slow_log(
+        &self,
+        count: usize,
+    ) -> impl Future<Output = Result<SlowLog>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         spawn(async move {
             let replies: Vec<Value> = pipe()
@@ -120,7 +125,7 @@ impl ServerNode {
     }
 
     /// Empties the slow log.
-    pub fn reset_slow_log(&self) -> impl Future<Output = Result<()>> + Send + 'static {
+    pub fn reset_slow_log(&self) -> impl Future<Output = Result<()>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         let refused = self.refused();
         spawn(async move {
@@ -137,7 +142,7 @@ impl ServerNode {
 
     /// Every client connected, and which of them is redcrab's own
     /// connection.
-    pub fn clients(&self) -> impl Future<Output = Result<ClientList>> + Send + 'static {
+    pub fn clients(&self) -> impl Future<Output = Result<ClientList>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         spawn(async move {
             let replies: Vec<Value> = pipe()
@@ -165,7 +170,10 @@ impl ServerNode {
     }
 
     /// Disconnects the client `id`. `false` when it was gone already.
-    pub fn kill_client(&self, id: u64) -> impl Future<Output = Result<bool>> + Send + 'static {
+    pub fn kill_client(
+        &self,
+        id: u64,
+    ) -> impl Future<Output = Result<bool>> + Send + 'static + use<> {
         let mut con = self.conn.clone();
         let refused = self.refused();
         spawn(async move {

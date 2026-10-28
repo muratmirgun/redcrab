@@ -8,7 +8,7 @@ use gpui_kit::KeyBinding;
 
 use crate::{
     DeleteKey, FocusSearch, NewKey, NewWindow, OpenPalette, OpenSettings, Quit, Refresh, SaveValue,
-    ToggleConsole,
+    ShowKeys, ShowServer, ToggleConsole,
 };
 
 /// A keystroke with the platform's primary modifier, as the `&'static
@@ -57,6 +57,8 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new(primary!("j"), ToggleConsole, WORKSPACE),
         KeyBinding::new(primary!("s"), SaveValue, WORKSPACE),
         KeyBinding::new(primary!("shift-n"), NewKey, WORKSPACE),
+        KeyBinding::new(primary!("1"), ShowKeys, WORKSPACE),
+        KeyBinding::new(primary!("2"), ShowServer, WORKSPACE),
     ]
 }
 

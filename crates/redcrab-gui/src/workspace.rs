@@ -10,7 +10,9 @@ use gpui_kit::{
         button::{Button, ButtonVariants as _},
         h_flex, h_resizable,
         notification::Notification,
-        resizable_panel, v_flex, v_resizable,
+        resizable_panel,
+        tab::{Tab, TabBar},
+        v_flex, v_resizable,
     },
     div,
     prelude::FluentBuilder as _,
@@ -19,9 +21,10 @@ use gpui_kit::{
 use redcrab_core::{Client, DbInfo, Key, ServerInfo};
 
 use crate::{
-    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ToggleConsole,
+    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ShowKeys, ShowServer, ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
+    server::ServerView,
     shortcuts,
     value::{ValueEvent, ValuePanel, ask_to_discard_edits},
 };
@@ -31,6 +34,26 @@ pub enum WorkspaceEvent {
     /// The workspace moved to another database: what it shows of its
     /// connection changed.
     ClientChanged,
+}
+
+/// What fills the workspace above the status bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// The key tree and the value panel, with the console.
+    Keys,
+    /// The server tools.
+    Server,
+}
+
+impl View {
+    pub const ALL: [Self; 2] = [Self::Keys, Self::Server];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keys => "Keys",
+            Self::Server => "Server",
+        }
+    }
 }
 
 /// One connected server: key tree, value panel, console and status bar.
@@ -43,6 +66,9 @@ pub struct Workspace {
     value: Entity<ValuePanel>,
     console: Entity<Console>,
     show_console: bool,
+    view: View,
+    /// Made the first time the server tools are shown.
+    server: Option<Entity<ServerView>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
@@ -114,6 +140,8 @@ impl Workspace {
             value,
             console,
             show_console: false,
+            view: View::Keys,
+            server: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             _poll: poll,
@@ -253,18 +281,60 @@ impl Workspace {
             .update(cx, |value, cx| value.set_client(client.clone(), cx));
         self.console
             .update(cx, |console, cx| console.set_client(&client, cx));
+        if let Some(server) = &self.server {
+            server.update(cx, |server, cx| server.set_client(client.clone(), cx));
+        }
         self._poll = Self::poll(&client, cx);
         cx.emit(WorkspaceEvent::ClientChanged);
         cx.notify();
     }
 
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Shows the keys or the server tools. The server tools ask the server
+    /// only while they are shown.
+    pub fn show(&mut self, view: View, window: &mut Window, cx: &mut Context<Self>) {
+        if view == self.view {
+            return;
+        }
+        self.view = view;
+        if view == View::Server && self.server.is_none() {
+            let client = self.client.clone();
+            self.server = Some(cx.new(|cx| ServerView::new(client, window, cx)));
+        }
+        if let Some(server) = &self.server {
+            server.update(cx, |server, cx| server.set_shown(view == View::Server, cx));
+        }
+        if view == View::Keys {
+            let focus = self.keys.focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn show_keys(&mut self, _: &ShowKeys, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Keys, window, cx);
+    }
+
+    fn show_server(&mut self, _: &ShowServer, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Server, window, cx);
+    }
+
+    /// ⌘R: what is shown, read again.
     fn refresh(&mut self, _: &Refresh, window: &mut Window, cx: &mut Context<Self>) {
+        if let (View::Server, Some(server)) = (self.view, &self.server) {
+            server.update(cx, |server, cx| server.refresh(cx));
+            return;
+        }
         self.keys.update(cx, |keys, cx| keys.rescan(window, cx));
         self.value
             .update(cx, |value, cx| value.reload_asking(window, cx));
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Keys, window, cx);
         self.keys
             .update(cx, |keys, cx| keys.focus_search(window, cx));
     }
@@ -272,8 +342,9 @@ impl Workspace {
     /// ⌘⌫: asks before deleting the rows picked in the value, or else the
     /// key shown.
     fn delete_key(&mut self, _: &DeleteKey, window: &mut Window, cx: &mut Context<Self>) {
-        // Read-only connections have no delete (core would refuse it anyway).
-        if self.client.config().read_only {
+        // Read-only connections have no delete (core would refuse it
+        // anyway), and the server tools show no key to delete.
+        if self.client.config().read_only || self.view != View::Keys {
             return;
         }
         self.value
@@ -281,10 +352,13 @@ impl Workspace {
     }
 
     fn save_value(&mut self, _: &SaveValue, window: &mut Window, cx: &mut Context<Self>) {
-        self.value.update(cx, |value, cx| value.save(window, cx));
+        if self.view == View::Keys {
+            self.value.update(cx, |value, cx| value.save(window, cx));
+        }
     }
 
     fn new_key(&mut self, _: &NewKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::Keys, window, cx);
         self.keys.update(cx, |keys, cx| keys.new_key(window, cx));
     }
 
@@ -364,22 +438,47 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let right = if self.show_console {
-            v_resizable("value-console")
-                .child(resizable_panel().child(self.value.clone()))
+        // The console goes under what it is opened beside: the value, or
+        // the server tools.
+        let with_console = |id: &'static str, above: gpui_kit::AnyElement| {
+            if self.show_console {
+                v_resizable(id)
+                    .child(resizable_panel().child(above))
+                    .child(
+                        resizable_panel()
+                            .size(px(240.))
+                            .size_range(px(120.)..px(700.))
+                            .child(self.console.clone()),
+                    )
+                    .into_any_element()
+            } else {
+                div().size_full().child(above).into_any_element()
+            }
+        };
+        let main = match (self.view, &self.server) {
+            (View::Server, Some(server)) => {
+                with_console("server-console", server.clone().into_any_element())
+            }
+            _ => h_resizable("workspace")
                 .child(
                     resizable_panel()
-                        .size(px(240.))
-                        .size_range(px(120.)..px(700.))
-                        .child(self.console.clone()),
+                        .size(px(360.))
+                        .size_range(px(220.)..px(760.))
+                        .child(
+                            div()
+                                .size_full()
+                                .border_r_1()
+                                .border_color(theme.border)
+                                .child(self.keys.clone()),
+                        ),
                 )
-                .into_any_element()
-        } else {
-            div()
-                .size_full()
-                .child(self.value.clone())
-                .into_any_element()
+                .child(resizable_panel().child(with_console(
+                    "value-console",
+                    self.value.clone().into_any_element(),
+                )))
+                .into_any_element(),
         };
+        let view = self.view;
 
         v_flex()
             .size_full()
@@ -391,24 +490,31 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_console))
             .on_action(cx.listener(Self::save_value))
             .on_action(cx.listener(Self::new_key))
+            .on_action(cx.listener(Self::show_keys))
+            .on_action(cx.listener(Self::show_server))
             .child(
-                div().flex_1().min_h_0().child(
-                    h_resizable("workspace")
-                        .child(
-                            resizable_panel()
-                                .size(px(360.))
-                                .size_range(px(220.)..px(760.))
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .border_r_1()
-                                        .border_color(theme.border)
-                                        .child(self.keys.clone()),
-                                ),
-                        )
-                        .child(resizable_panel().child(right)),
-                ),
+                TabBar::new("views")
+                    .underline()
+                    .px_2()
+                    .selected_index(View::ALL.iter().position(|v| *v == view).unwrap_or(0))
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        this.show(View::ALL[*ix], window, cx);
+                    }))
+                    .children(View::ALL.into_iter().enumerate().map(|(ix, view)| {
+                        Tab::new()
+                            .label(view.label())
+                            .icon(match view {
+                                View::Keys => gpui_kit::assets::IconName::Key,
+                                View::Server => gpui_kit::assets::IconName::Server,
+                            })
+                            .aria_label(format!(
+                                "{} ({})",
+                                view.label(),
+                                shortcuts::hint(&(ix + 1).to_string(), false)
+                            ))
+                    })),
             )
+            .child(div().flex_1().min_h_0().child(main))
             .child(self.render_status(cx))
     }
 }

@@ -197,6 +197,24 @@ suggestions or stops a running command, and <kbd>⌘K</kbd> clears the log.
 Shortcuts use <kbd>⌘</kbd> on macOS and <kbd>Ctrl</kbd> on Linux and Windows
 (<kbd>Ctrl</kbd>+<kbd>J</kbd>, <kbd>Ctrl</kbd>+<kbd>S</kbd>, ...).
 
+## Server
+
+The **Server** tab (<kbd>⌘2</kbd>; <kbd>⌘1</kbd> goes back to the keys) shows what the server
+says about itself, read every two seconds while it is open and never while it is not:
+
+- **Overview:** operations per second, memory (with its peak, RSS, fragmentation and
+  `maxmemory`), clients and the hit rate, each with its last two minutes charted; keys
+  per database, the server and its uptime, persistence and replication.
+- **Slow Log:** the slowest commands as typed, how long they took, when and from which
+  client, and how the log is set up; **Reset…** empties it.
+- **Clients:** every connection, filtered by address, name, user or command, with
+  redcrab's own marked; **Kill…** disconnects one.
+- **INFO:** every field, filtered.
+
+On a cluster it looks at one primary at a time, picked at the top right. Reset and Kill
+are refused on a read-only connection, and they ask first. A user whose ACL lacks
+`INFO`, `SLOWLOG` or `CLIENT` sees why instead of the figures.
+
 ## Command palette and settings
 
 <kbd>⌘K</kbd> opens the command palette: everything the window can do, with its
