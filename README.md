@@ -39,7 +39,8 @@ it relies on: a key deleted or replaced since it was loaded is never recreated o
 overwritten, a list element is only changed while it still holds what was loaded, a new key
 never replaces an existing one. A read-only connection refuses every change in core, not
 just in the UI. Users whose ACL denies scripts (`-@scripting`) can still save strings,
-change TTLs and rename keys; editing collections and creating keys needs `EVAL`.
+create string keys, change TTLs and rename keys; editing collections and creating keys of
+other types needs `EVAL`, and after the first refusal the value panel stops offering it.
 
 ## TLS
 

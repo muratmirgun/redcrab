@@ -180,10 +180,48 @@ fn strings_and_ttls_change_without_scripting() {
         password: Some("it-pass".into()),
         ..standalone()
     });
-    // Scripts really are refused.
-    let err =
-        block_on(client.hash_set(t.bkey("h"), b"f".to_vec(), b"w".to_vec(), true)).unwrap_err();
-    assert!(format!("{err:#}").contains("permission"), "{err:#}");
+    // Scripts really are refused, and the refusal says what it means.
+    assert_eq!(
+        edit_error(block_on(client.hash_set(
+            t.bkey("h"),
+            b"f".to_vec(),
+            b"w".to_vec(),
+            true
+        ))),
+        EditError::ScriptsRefused
+    );
+    assert_eq!(
+        edit_error(block_on(client.create_key(
+            t.bkey("new-hash"),
+            NewValue::Hash(vec![(b"f".to_vec(), b"v".to_vec())]),
+            None
+        ))),
+        EditError::ScriptsRefused
+    );
+    assert!(!exists(&mut con, &t.bkey("new-hash")));
+    // A new string does without: SET NX, with its TTL at once.
+    let created = t.bkey("new-string");
+    block_on(client.create_key(created.clone(), NewValue::String(BIN.to_vec()), Some(60))).unwrap();
+    let stored: Vec<u8> = cmd(&mut con, &[b"GET", &created]);
+    assert_eq!(stored, BIN);
+    assert!((59_000..=60_000).contains(&pttl(&mut con, &created)));
+    assert_eq!(
+        edit_error(block_on(client.create_key(
+            created.clone(),
+            NewValue::String(b"other".to_vec()),
+            None
+        ))),
+        EditError::KeyExists
+    );
+    assert_eq!(
+        edit_error(block_on(client.create_key(
+            t.bkey("h"),
+            NewValue::String(b"x".to_vec()),
+            None
+        ))),
+        EditError::KeyExists
+    );
+    assert_eq!(key_type(&mut con, &t.bkey("h")), "hash");
 
     let s = t.bkey("s");
     block_on(client.set_string(s.clone(), BIN.to_vec())).unwrap();

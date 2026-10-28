@@ -96,6 +96,10 @@ pub struct ValuePanel {
     confirm_delete: bool,
     /// A change is on its way to the server.
     saving: bool,
+    /// The server refused to run a script for this user
+    /// ([`EditError::ScriptsRefused`]): changing rows needs one, so the
+    /// panel stops offering it.
+    scripts_refused: bool,
     scroll: UniformListScrollHandle,
     _load: Option<Task<()>>,
     _more: Option<Task<()>>,
@@ -118,6 +122,7 @@ impl ValuePanel {
             row: None,
             confirm_delete: false,
             saving: false,
+            scripts_refused: false,
             scroll: UniformListScrollHandle::new(),
             _load: None,
             _more: None,
@@ -128,6 +133,12 @@ impl ValuePanel {
     /// A read-only connection shows values but never offers to change them.
     fn read_only(&self) -> bool {
         self.client.config().read_only
+    }
+
+    /// Whether rows of a collection can be added, edited or deleted: on a
+    /// writable connection whose user may run the scripts that takes.
+    fn rows_editable(&self) -> bool {
+        !self.read_only() && !self.scripts_refused
     }
 
     pub fn load(&mut self, key: Key, window: &mut Window, cx: &mut Context<Self>) {
@@ -466,8 +477,14 @@ impl ValuePanel {
         let title = match edit {
             Some(EditError::Changed | EditError::ElementMissing) => "The value changed",
             Some(EditError::KeyMissing) => "The key is gone",
+            Some(EditError::ScriptsRefused) => "Scripts are not allowed",
             _ => "Save failed",
         };
+        if edit == Some(&EditError::ScriptsRefused) {
+            // Every row change would fail the same way: stop offering them.
+            // An open row's typing stays, read-only, to copy.
+            self.scripts_refused = true;
+        }
         window.push_notification(Notification::error(format!("{err:#}")).title(title), cx);
         if matches!(edit, Some(EditError::KeyMissing | EditError::WrongType(_))) {
             self.reload(window, cx);
@@ -689,7 +706,7 @@ impl ValuePanel {
 
     /// Opens row `ix` in the detail pane, editable on a writable connection.
     fn open_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let writable = !self.read_only();
+        let writable = self.rows_editable();
         let Some(edit) = self
             .loaded
             .as_ref()
@@ -1062,7 +1079,7 @@ impl ValuePanel {
         let theme = cx.theme();
         let columns = loaded.columns();
         let count = loaded.row_count();
-        let writable = !self.read_only();
+        let writable = self.rows_editable();
         let add_title = loaded.add_row().map(|add| add.title());
         let picked = self.picked.len();
         v_flex()
@@ -1174,7 +1191,7 @@ impl ValuePanel {
     /// its value.
     fn render_row(&self, row: &RowPane, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let writable = !self.read_only();
+        let writable = self.rows_editable();
         let dirty = writable && row.dirty();
         let label = match (&row.name, self.loaded.as_ref().map(|l| &l.data)) {
             (Some(_), _) => None,

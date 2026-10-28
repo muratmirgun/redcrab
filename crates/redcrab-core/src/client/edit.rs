@@ -46,6 +46,11 @@ pub enum EditError {
     /// A list element is no longer what was loaded: the list changed in
     /// the meantime. Nothing was written.
     Changed,
+    /// The server will not run scripts for this user (an ACL without
+    /// `@scripting`, or EVAL disabled or renamed away), and this change
+    /// needs one to stay atomic. Nothing was written. Strings, TTLs,
+    /// renames and deletes do without.
+    ScriptsRefused,
 }
 
 impl fmt::Display for EditError {
@@ -58,6 +63,9 @@ impl fmt::Display for EditError {
             Self::ElementExists => f.write_str("it already exists"),
             Self::Changed => f.write_str(
                 "the list changed since it was loaded, so nothing was written; reload and try again",
+            ),
+            Self::ScriptsRefused => f.write_str(
+                "this user may not run scripts (EVAL), which changing collections and creating keys other than strings need; strings, expiry, renames and deletes still work",
             ),
         }
     }
@@ -451,9 +459,26 @@ async fn removed(eval: Cmd, con: &mut Conn) -> Result<Removed> {
     Ok(Removed { count, left })
 }
 
-/// A script's refusal (`REDCRAB_<WHAT> <detail>`) as an [`EditError`];
-/// any other error as it is.
+/// Whether the server refused to run EVAL itself, rather than something a
+/// script did: `NOPERM ... 'eval' command` for an ACL without
+/// `@scripting`, or an unknown command where EVAL was renamed away. A
+/// script's own NOPERM for a key outside the user's patterns is not one.
+fn eval_refused(err: &RedisError) -> bool {
+    let detail = err.detail().unwrap_or_default().to_ascii_lowercase();
+    match err.code() {
+        Some("NOPERM") => detail.contains("'eval"),
+        Some("ERR") => detail.starts_with("unknown command") && detail.contains("eval"),
+        _ => false,
+    }
+}
+
+/// A script's refusal (`REDCRAB_<WHAT> <detail>`) as an [`EditError`],
+/// and a server that will not run scripts as
+/// [`EditError::ScriptsRefused`]; any other error as it is.
 pub(crate) fn script_error(err: RedisError) -> anyhow::Error {
+    if eval_refused(&err) {
+        return EditError::ScriptsRefused.into();
+    }
     // Redis 7+ puts `ERR ` before an error reply that has no space in it;
     // the scripts always add a detail, but read either form.
     let (code, detail) = match (err.code(), err.detail()) {
@@ -872,6 +897,10 @@ impl Client {
     /// Creates a key with `value` and, if given, a TTL in seconds, all at
     /// once: either the whole key appears or nothing does. Refuses with
     /// [`EditError::KeyExists`] if the key exists, whatever its type.
+    ///
+    /// Users the server does not let run scripts can still create strings
+    /// (`SET ... NX [EX]`, as atomic); other types fail with
+    /// [`EditError::ScriptsRefused`].
     pub fn create_key(
         &self,
         key: Key,
@@ -886,6 +915,11 @@ impl Client {
             let mut eval = script(CREATE, &key);
             eval.arg(value.type_name())
                 .arg(ttl.map(|t| t.to_string()).unwrap_or_default());
+            // Kept for a server that refuses the script.
+            let plain = match &value {
+                NewValue::String(bytes) => Some(bytes.clone()),
+                _ => None,
+            };
             match value {
                 NewValue::String(bytes) => {
                     eval.arg(bytes);
@@ -917,9 +951,33 @@ impl Client {
                 Err(err) if err.downcast_ref() == Some(&EditError::ElementExists) => {
                     Err(EditError::KeyExists.into())
                 }
+                Err(err) if err.downcast_ref() == Some(&EditError::ScriptsRefused) => match plain {
+                    Some(bytes) => create_string_plain(&key, bytes, ttl, &mut con).await,
+                    None => Err(err),
+                },
                 other => other,
             }
         })
+    }
+}
+
+/// A string key created without a script, in one command all the same:
+/// `NX` refuses a key that exists, `EX` sets the TTL with it.
+async fn create_string_plain(
+    key: &[u8],
+    value: Vec<u8>,
+    ttl: Option<u64>,
+    con: &mut Conn,
+) -> Result<()> {
+    let mut set = cmd("SET");
+    set.arg(key).arg(value).arg("NX");
+    if let Some(ttl) = ttl {
+        set.arg("EX").arg(ttl);
+    }
+    let created: Option<redis::Value> = set.query_async(con).await?;
+    match created {
+        Some(_) => Ok(()),
+        None => Err(EditError::KeyExists.into()),
     }
 }
 
@@ -975,4 +1033,39 @@ pub(crate) fn check_ttl(seconds: u64) -> Result<()> {
         "a TTL of {seconds} seconds is out of range"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(line: &[u8]) -> RedisError {
+        match redis::parse_redis_value(line).unwrap() {
+            redis::Value::ServerError(err) => err.into(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_server_refusing_scripts_is_told_apart() {
+        for refused in [
+            &b"-NOPERM User ops has no permissions to run the 'eval' command\r\n"[..],
+            b"-NOPERM User ops has no permissions to run the 'evalsha' command\r\n",
+            b"-ERR unknown command 'EVAL', with args beginning with: \r\n",
+        ] {
+            let err = script_error(server(refused));
+            assert_eq!(
+                err.downcast_ref(),
+                Some(&EditError::ScriptsRefused),
+                "{err:#}"
+            );
+        }
+        // A script's own refusals, and NOPERM for a key, stay what they are.
+        let err = script_error(server(b"-NOPERM No permissions to access a key\r\n"));
+        assert_eq!(err.downcast_ref::<EditError>(), None, "{err:#}");
+        let err = script_error(server(b"-REDCRAB_NOKEY gone\r\n"));
+        assert_eq!(err.downcast_ref(), Some(&EditError::KeyMissing));
+        let err = script_error(server(b"-ERR unknown command 'FROB'\r\n"));
+        assert_eq!(err.downcast_ref::<EditError>(), None, "{err:#}");
+    }
 }
