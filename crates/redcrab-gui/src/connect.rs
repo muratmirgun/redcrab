@@ -386,7 +386,11 @@ impl ConnectView {
                         // What the user may not read (INFO, DBSIZE) is left out.
                         let mut facts: Vec<String> = [
                             info.server_label(),
-                            info.db_size.map(|n| format!("{} keys", format::count(n))),
+                            info.db_size.map(|n| match info.partial() {
+                                // Part of a cluster did not answer.
+                                Some(why) => format!("at least {} keys ({why})", format::count(n)),
+                                None => format!("{} keys", format::count(n)),
+                            }),
                             Some(format!("{:.1} ms", latency.as_secs_f64() * 1000.0)),
                         ]
                         .into_iter()

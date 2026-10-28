@@ -95,10 +95,17 @@ pub struct ServerInfo {
     pub used_memory_human: Option<String>,
     pub connected_clients: Option<u64>,
     pub uptime_secs: Option<u64>,
-    /// Keys in the selected database (on a cluster: in all primaries).
+    /// Keys in the selected database (on a cluster: in the primaries that
+    /// answered, see [`Self::partial`]).
     pub db_size: Option<u64>,
     /// On a cluster, the primaries the other facts were summed over.
     pub nodes: Option<usize>,
+    /// On a cluster, the primaries that were asked; more than
+    /// [`Self::nodes`] when some did not answer.
+    pub primaries: Option<usize>,
+    /// On a cluster, hash slots no known primary serves: their keys are in
+    /// none of the sums.
+    pub unowned_slots: usize,
 }
 
 impl ServerInfo {
@@ -112,15 +119,46 @@ impl ServerInfo {
         }
     }
 
+    /// Why a cluster's sums leave out part of the cluster, if they do:
+    /// "2 of 3 primaries answered", "120 slots have no primary".
+    pub fn partial(&self) -> Option<String> {
+        let mut why = Vec::new();
+        if let (Some(answered), Some(asked)) = (self.nodes, self.primaries)
+            && answered < asked
+        {
+            why.push(format!("{answered} of {asked} primaries answered"));
+        }
+        if self.unowned_slots > 0 {
+            why.push(format!(
+                "{} {} no primary",
+                crate::format::count(self.unowned_slots as u64),
+                if self.unowned_slots == 1 {
+                    "slot has"
+                } else {
+                    "slots have"
+                }
+            ));
+        }
+        (!why.is_empty()).then(|| why.join(", "))
+    }
+
     /// The known facts as short phrases, for a status line: the server,
-    /// "1,234 keys", "1.20M used", "3 clients".
+    /// "1,234 keys", "1.20M used", "3 clients". When a cluster's sums are
+    /// partial ([`Self::partial`]) they say "at least", and why comes
+    /// right after the server.
     pub fn summary(&self) -> Vec<String> {
+        let partial = self.partial();
+        let at_least = if partial.is_some() { "at least " } else { "" };
         [
             self.server_label(),
+            partial,
             self.db_size
-                .map(|n| format!("{} keys", crate::format::count(n))),
-            self.used_memory_human.as_ref().map(|m| format!("{m} used")),
-            self.connected_clients.map(|n| format!("{n} clients")),
+                .map(|n| format!("{at_least}{} keys", crate::format::count(n))),
+            self.used_memory_human
+                .as_ref()
+                .map(|m| format!("{at_least}{m} used")),
+            self.connected_clients
+                .map(|n| format!("{at_least}{n} clients")),
         ]
         .into_iter()
         .flatten()

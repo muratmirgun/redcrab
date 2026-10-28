@@ -87,7 +87,8 @@ fn connects_and_reports_the_layout() {
     let keys = seed_strings(&t, 30);
     let info = block_on(client.server_info()).unwrap();
     assert_eq!(info.mode.as_deref(), Some("cluster"));
-    assert_eq!(info.nodes, Some(3));
+    assert_eq!((info.nodes, info.primaries), (Some(3), Some(3)));
+    assert_eq!(info.partial(), None);
     assert!(info.version.is_some());
     assert!(info.used_memory_human.is_some());
     assert!(info.connected_clients.unwrap() >= 3);

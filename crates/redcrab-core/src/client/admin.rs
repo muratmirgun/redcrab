@@ -27,14 +27,18 @@ impl Client {
     ///
     /// On a cluster the facts are summed over the primaries that answered
     /// (keys, memory, clients; the uptime is the shortest), the mode is
-    /// "cluster" and [`ServerInfo::nodes`] says how many primaries answered.
+    /// "cluster", and [`ServerInfo::nodes`] and [`ServerInfo::primaries`]
+    /// say how many primaries answered out of how many were asked. Sums
+    /// that leave out part of the cluster (a primary that did not answer,
+    /// slots without one) say so in [`ServerInfo::partial`].
     pub fn server_info(&self) -> impl Future<Output = Result<ServerInfo>> + Send + 'static {
         let con = self.conn.clone();
         spawn(async move {
             if !con.is_cluster() {
                 return Ok(node_info(&mut con.clone()).await?.info);
             }
-            let (nodes, _) = con.walk_nodes().await;
+            let (nodes, unowned) = con.walk_nodes().await;
+            let asked = nodes.len();
             let replies = join_all(
                 nodes
                     .into_iter()
@@ -52,7 +56,13 @@ impl Client {
             if answered.is_empty() {
                 return Err(failure.unwrap_or_else(|| anyhow!("the cluster has no primaries")));
             }
-            Ok(aggregate(&answered))
+            if let Some(err) = failure.filter(|_| answered.len() < asked) {
+                tracing::warn!(
+                    "{} of {asked} cluster primaries did not answer INFO: {err:#}",
+                    asked - answered.len()
+                );
+            }
+            Ok(aggregate(&answered, asked, unowned))
         })
     }
 
@@ -103,14 +113,15 @@ async fn node_info(con: &mut Conn) -> Result<NodeInfo> {
             connected_clients: number("connected_clients"),
             uptime_secs: number("uptime_in_seconds"),
             db_size,
-            nodes: None,
+            ..ServerInfo::default()
         },
         used_memory: number("used_memory"),
     })
 }
 
-/// The facts of a cluster's primaries as one.
-fn aggregate(nodes: &[NodeInfo]) -> ServerInfo {
+/// The facts of a cluster's primaries as one: `nodes` answered of
+/// `asked`, and `unowned` slots had no primary to ask.
+fn aggregate(nodes: &[NodeInfo], asked: usize, unowned: usize) -> ServerInfo {
     // A sum is only right if every node told.
     let sum = |get: fn(&NodeInfo) -> Option<u64>| -> Option<u64> {
         nodes.iter().map(get).sum::<Option<u64>>()
@@ -123,6 +134,8 @@ fn aggregate(nodes: &[NodeInfo]) -> ServerInfo {
         uptime_secs: nodes.iter().filter_map(|n| n.info.uptime_secs).min(),
         db_size: sum(|n| n.info.db_size),
         nodes: Some(nodes.len()),
+        primaries: Some(asked),
+        unowned_slots: unowned,
     }
 }
 
@@ -177,11 +190,15 @@ mod tests {
                 connected_clients: Some(clients),
                 uptime_secs: Some(uptime),
                 db_size: keys,
-                nodes: None,
+                ..ServerInfo::default()
             },
             used_memory: Some(memory),
         };
-        let info = aggregate(&[node(Some(10), 1024, 2, 50), node(Some(5), 2048, 3, 40)]);
+        let info = aggregate(
+            &[node(Some(10), 1024, 2, 50), node(Some(5), 2048, 3, 40)],
+            2,
+            0,
+        );
         assert_eq!(info.db_size, Some(15));
         assert_eq!(info.used_memory_human.as_deref(), Some("3.00K"));
         assert_eq!(info.connected_clients, Some(5));
@@ -191,8 +208,56 @@ mod tests {
             info.server_label().as_deref(),
             Some("Redis 8.0.2 · cluster")
         );
+        assert_eq!(info.partial(), None);
+        assert_eq!(
+            info.summary(),
+            [
+                "Redis 8.0.2 · cluster",
+                "15 keys",
+                "3.00K used",
+                "5 clients"
+            ]
+        );
         // A node that would not say: no sum rather than a wrong one.
-        let info = aggregate(&[node(Some(10), 1, 1, 1), node(None, 1, 1, 1)]);
+        let info = aggregate(&[node(Some(10), 1, 1, 1), node(None, 1, 1, 1)], 2, 0);
         assert_eq!(info.db_size, None);
+    }
+
+    #[test]
+    fn partial_cluster_sums_say_so() {
+        let node = |keys| NodeInfo {
+            info: ServerInfo {
+                version: Some("8.0.2".into()),
+                db_size: Some(keys),
+                connected_clients: Some(2),
+                ..ServerInfo::default()
+            },
+            used_memory: Some(2048),
+        };
+        // One primary of three did not answer.
+        let info = aggregate(&[node(1000), node(500)], 3, 0);
+        assert_eq!(info.db_size, Some(1500));
+        assert_eq!((info.nodes, info.primaries), (Some(2), Some(3)));
+        assert_eq!(info.partial().as_deref(), Some("2 of 3 primaries answered"));
+        assert_eq!(
+            info.summary(),
+            [
+                "Redis 8.0.2 · cluster",
+                "2 of 3 primaries answered",
+                "at least 1,500 keys",
+                "at least 4.00K used",
+                "at least 4 clients",
+            ]
+        );
+        // Slots without a primary leave their keys out too.
+        let info = aggregate(&[node(1), node(1), node(1)], 3, 1);
+        assert_eq!(info.partial().as_deref(), Some("1 slot has no primary"));
+        let info = aggregate(&[node(1)], 3, 5461);
+        assert_eq!(
+            info.partial().as_deref(),
+            Some("1 of 3 primaries answered, 5,461 slots have no primary")
+        );
+        // A single server is never partial.
+        assert_eq!(node(1).info.partial(), None);
     }
 }
