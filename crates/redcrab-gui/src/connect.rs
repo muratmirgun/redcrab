@@ -153,6 +153,9 @@ pub struct ConnectView {
     /// The SSH server's key, when the last attempt failed because no
     /// known_hosts file has it: the user can trust exactly that key.
     untrusted: Option<HostKeyError>,
+    /// The attempt `untrusted` came from was a Test: trusting the key
+    /// tests again, and saves nothing (no connection, no password).
+    untrusted_by_test: bool,
     /// Why the settings cannot work, shown next to the field; checked again
     /// on every edit until it is fixed.
     invalid: Option<InvalidConfig>,
@@ -188,6 +191,7 @@ impl ConnectView {
             busy: false,
             error: None,
             untrusted: None,
+            untrusted_by_test: false,
             invalid: None,
             _task: None,
             _subscriptions: subscriptions,
@@ -409,6 +413,7 @@ impl ConnectView {
                             .downcast_ref::<HostKeyError>()
                             .filter(|refused| refused.problem == HostKeyProblem::Unknown)
                             .cloned();
+                        this.untrusted_by_test = test_only;
                         this.error = Some(format!("{err:#}").into());
                     }
                 }
@@ -419,13 +424,15 @@ impl ConnectView {
     }
 
     /// Records the SSH server's key the user has checked in redcrab's
-    /// known_hosts file, then connects again. Exactly that key is trusted:
-    /// a different one on the next connection is refused, and the host key
-    /// policy is left as it is.
+    /// known_hosts file, then tries again as before: connects, or after a
+    /// Test, only tests (saving neither the connection nor its passwords).
+    /// Exactly that key is trusted: a different one on the next connection
+    /// is refused, and the host key policy is left as it is.
     fn trust_host_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(refused) = self.untrusted.take() else {
             return;
         };
+        let test_only = self.untrusted_by_test;
         cx.notify();
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
             // Writes a file.
@@ -434,7 +441,7 @@ impl ConnectView {
                 .spawn(async move { KnownHosts::system().trust(&refused) })
                 .await;
             this.update_in(cx, |this, window, cx| match trusted {
-                Ok(()) => this.connect(window, cx),
+                Ok(()) => this.open(test_only, window, cx),
                 Err(err) => {
                     this.error = Some(format!("could not trust the key: {err}").into());
                     cx.notify();
