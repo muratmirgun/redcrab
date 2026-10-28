@@ -33,7 +33,7 @@ use crate::{
     Collapse, Expand, SelectNext, SelectPrev,
     bulk::{BulkDeleteView, BulkEvent},
     edit::{self, ChangeForm, OnDone},
-    style,
+    shortcuts, style,
 };
 
 const ROW_HEIGHT: f32 = 26.;
@@ -834,7 +834,7 @@ impl Render for KeyBrowser {
                                 // Not while the list moves to another
                                 // database (see `new_key`).
                                 .disabled(self.switching.is_some())
-                                .tooltip("New key (⇧⌘N)")
+                                .tooltip(format!("New key ({})", shortcuts::hint("N", true)))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.new_key(window, cx)),
                                 ),
@@ -854,7 +854,7 @@ impl Render for KeyBrowser {
                             .small()
                             .icon(IconName::RefreshCw)
                             .loading(scanning)
-                            .tooltip("Rescan (⌘R)")
+                            .tooltip(format!("Rescan ({})", shortcuts::hint("R", false)))
                             .on_click(cx.listener(|this, _, window, cx| this.rescan(window, cx))),
                     ),
             )

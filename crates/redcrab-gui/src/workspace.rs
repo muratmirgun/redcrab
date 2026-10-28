@@ -22,6 +22,7 @@ use crate::{
     DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
+    shortcuts,
     value::{ValueEvent, ValuePanel, ask_to_discard_edits},
 };
 
@@ -329,7 +330,7 @@ impl Workspace {
                     .icon(gpui_kit::assets::IconName::Terminal)
                     .label("Console")
                     .selected(self.show_console)
-                    .tooltip("Toggle console (⌘J)")
+                    .tooltip(format!("Toggle console ({})", shortcuts::hint("J", false)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_console(&ToggleConsole, window, cx)
                     })),

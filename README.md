@@ -146,6 +146,9 @@ names, subcommands and the options a command takes at the cursor (again to cycle
 rest of the command's syntax shows greyed out as you type, <kbd>Esc</kbd> closes the
 suggestions or stops a running command, and <kbd>⌘K</kbd> clears the log.
 
+Shortcuts use <kbd>⌘</kbd> on macOS and <kbd>Ctrl</kbd> on Linux and Windows
+(<kbd>Ctrl</kbd>+<kbd>J</kbd>, <kbd>Ctrl</kbd>+<kbd>S</kbd>, ...).
+
 ## Layout
 
 | Crate | What |

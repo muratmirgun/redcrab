@@ -22,7 +22,9 @@ use redcrab_core::{
     format,
 };
 
-use crate::{ClearConsole, CompleteNext, CompletePrev, HistoryNext, HistoryPrev, StopCommand};
+use crate::{
+    ClearConsole, CompleteNext, CompletePrev, HistoryNext, HistoryPrev, StopCommand, shortcuts,
+};
 
 /// The console's keys. Up, Down and Tab are the text input's own keys too
 /// (cursor moves, indent), and the deepest context wins: these match in
@@ -36,7 +38,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", HistoryNext, INPUT),
         KeyBinding::new("tab", CompleteNext, INPUT),
         KeyBinding::new("shift-tab", CompletePrev, INPUT),
-        KeyBinding::new("cmd-k", ClearConsole, Some("Console")),
+        KeyBinding::new(shortcuts::primary!("k"), ClearConsole, Some("Console")),
         KeyBinding::new("ctrl-l", ClearConsole, Some("Console")),
     ]
 }
@@ -514,7 +516,10 @@ impl Render for Console {
                             .text_xs()
                             .when(self.entries.is_empty(), |this| {
                                 this.child(div().text_color(theme.muted_foreground).child(
-                                    "Commands run on the console's own connection, so SELECT and MULTI stay here. ↑↓ history · Tab completes · ⌘K clears.",
+                                    format!(
+                                        "Commands run on the console's own connection, so SELECT and MULTI stay here. ↑↓ history · Tab completes · {} clears.",
+                                        shortcuts::hint("K", false)
+                                    ),
                                 ))
                             })
                             .children(
@@ -620,7 +625,10 @@ mod tests {
         assert!(is::<HistoryNext>(winner("down", &console)));
         assert!(is::<CompleteNext>(winner("tab", &console)));
         assert!(is::<CompletePrev>(winner("shift-tab", &console)));
-        assert!(is::<ClearConsole>(winner("cmd-k", &console)));
+        assert!(is::<ClearConsole>(winner(
+            shortcuts::primary!("k"),
+            &console
+        )));
     }
 
     #[test]
@@ -631,6 +639,9 @@ mod tests {
         assert!(is::<InputTab>(winner("tab", &search)));
         assert!(is::<ListUp>(winner("up", &["Workspace", "KeyList"])));
         assert!(winner("up", &["Workspace", "Console"]).is_none());
-        assert!(!is::<ClearConsole>(winner("cmd-k", &search)));
+        assert!(!is::<ClearConsole>(winner(
+            shortcuts::primary!("k"),
+            &search
+        )));
     }
 }

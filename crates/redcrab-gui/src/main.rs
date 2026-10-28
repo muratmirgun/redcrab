@@ -5,6 +5,7 @@ mod connect;
 mod console;
 mod edit;
 mod keys;
+mod shortcuts;
 mod style;
 mod value;
 mod workspace;
@@ -68,15 +69,9 @@ fn main() {
             gpui_kit::init(cx);
             Theme::sync_system_appearance(None, cx);
 
+            // ⌘ on macOS, Ctrl elsewhere (see `shortcuts`).
+            cx.bind_keys(shortcuts::bindings());
             cx.bind_keys([
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-n", NewWindow, None),
-                KeyBinding::new("cmd-r", Refresh, Some("Workspace")),
-                KeyBinding::new("cmd-f", FocusSearch, Some("Workspace")),
-                KeyBinding::new("cmd-backspace", DeleteKey, Some("Workspace")),
-                KeyBinding::new("cmd-j", ToggleConsole, Some("Workspace")),
-                KeyBinding::new("cmd-s", SaveValue, Some("Workspace")),
-                KeyBinding::new("cmd-shift-n", NewKey, Some("Workspace")),
                 KeyBinding::new("up", SelectPrev, Some("KeyList")),
                 KeyBinding::new("down", SelectNext, Some("KeyList")),
                 KeyBinding::new("right", Expand, Some("KeyList")),

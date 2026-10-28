@@ -28,7 +28,7 @@ use redcrab_core::{
 
 use crate::{
     edit::{self, ChangeForm, OnDone},
-    style,
+    shortcuts, style,
 };
 
 const ROW_HEIGHT: f32 = 26.;
@@ -1169,7 +1169,7 @@ impl ValuePanel {
                         .small()
                         .label("Save")
                         .loading(self.saving)
-                        .tooltip("Save (⌘S)")
+                        .tooltip(format!("Save ({})", shortcuts::hint("S", false)))
                         .on_click(cx.listener(|this, _, window, cx| this.save_text(window, cx))),
                 )
             })
@@ -1340,7 +1340,11 @@ impl ValuePanel {
                                 .xsmall()
                                 .icon(gpui_kit::assets::IconName::Trash)
                                 .label(label)
-                                .tooltip("Delete the selected rows (⌘-click to select more)")
+                                .tooltip(if cfg!(target_os = "macos") {
+                                    "Delete the selected rows (⌘-click to select more)"
+                                } else {
+                                    "Delete the selected rows (Ctrl+click to select more)"
+                                })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.request_delete_rows(window, cx)
                                 })),
@@ -1440,7 +1444,7 @@ impl ValuePanel {
                                 .xsmall()
                                 .label("Save")
                                 .loading(self.saving)
-                                .tooltip("Save (⌘S)")
+                                .tooltip(format!("Save ({})", shortcuts::hint("S", false)))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.save_row(window, cx)),
                                 ),
