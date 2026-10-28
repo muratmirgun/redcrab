@@ -107,6 +107,10 @@ impl Tunnel {
             options: options.clone(),
         });
         let session = login.login().await?;
+        // Loopback only, but open to every local program and user, as
+        // `ssh -L` is: whoever finds the port reaches the target under this
+        // SSH login, whatever redcrab's own read-only setting (the README
+        // says so).
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .context("could not listen on a local port for the SSH tunnel")?;

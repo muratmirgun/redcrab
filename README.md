@@ -94,6 +94,19 @@ connection to host and port *as the SSH server sees them* (e.g. `10.0.0.5:6379`,
 key file (OpenSSH format, optionally protected by a passphrase), or the keys of the running
 `ssh-agent` (`SSH_AUTH_SOCK`). The tunnel lives as long as the connection.
 
+**The tunnel's port is open to this whole computer**, as with `ssh -L`: any program on it,
+and any other user of it, that finds the port can reach Redis through the tunnel under your
+SSH login while redcrab is connected. Marking the connection read-only does not change that
+(redcrab enforces read-only itself; the tunnel forwards whatever it is sent). So give the
+Redis behind a bastion a password or ACL users rather than relying on the tunnel, and prefer
+not to tunnel from shared multi-user machines.
+
+Prefer an Ed25519 key. RSA keys work, but the RSA code SSH uses for them (the `rsa` crate)
+is not constant-time ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071),
+the Marvin attack, with no fixed release yet); redcrab signs with an RSA key once per SSH
+login. `deny.toml` and `.cargo/audit.toml` record that accepted risk for `cargo deny` and
+`cargo audit`.
+
 The SSH server's host key is always checked, against `~/.ssh/known_hosts` (only read) and
 redcrab's own `known_hosts` file in its config directory. **Known hosts only** refuses
 servers neither file has, showing the fingerprint of the key the server presented; after

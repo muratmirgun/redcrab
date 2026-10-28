@@ -21,6 +21,10 @@ dirs = "6"
 keyring-core = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # SSH tunnels. `ring` like rustls, so there is one crypto backend to build.
+# `rsa` is for bastions and keys that are RSA only; it brings in the `rsa`
+# crate, whose private-key operations are not constant-time
+# (RUSTSEC-2023-0071, no fixed release): accepted in deny.toml and
+# .cargo/audit.toml, and the README recommends Ed25519 keys.
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 # Hashed known_hosts entries: base64 salts and HMAC-SHA1.
 data-encoding = "2"

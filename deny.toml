@@ -1,0 +1,13 @@
+# cargo-deny settings (`cargo deny check advisories`). Only what the project
+# has decided is recorded here; everything else keeps cargo-deny's defaults.
+
+[advisories]
+version = 2
+ignore = [
+    # The `rsa` crate (0.10.0-rc, through russh's `rsa` feature and ssh-key)
+    # is not constant-time in its private-key operations (the Marvin attack)
+    # and has no fixed release. redcrab uses it only to sign one SSH login
+    # with an RSA key file; RSA-only bastions need it. The README recommends
+    # Ed25519 keys. Drop this once a fixed `rsa` reaches russh.
+    { id = "RUSTSEC-2023-0071", reason = "RSA SSH keys only; no fixed rsa release yet; see crates/redcrab-core/Cargo.toml" },
+]

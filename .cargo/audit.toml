@@ -1,0 +1,6 @@
+# cargo-audit settings. See deny.toml for why: the `rsa` crate behind
+# russh's `rsa` feature (RSA SSH keys) has no release fixing the Marvin
+# attack yet; redcrab signs one SSH login with it, and the README
+# recommends Ed25519 keys.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
