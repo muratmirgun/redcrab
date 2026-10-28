@@ -29,11 +29,8 @@ use redis::{
     cmd,
 };
 
-use super::connect_error;
-use crate::{
-    commands::{self, CommandClass},
-    config::{ConnectionConfig, Target, Topology, format_address, parse_address},
-};
+use super::{conn::may_write, connect_error};
+use crate::config::{ConnectionConfig, Target, Topology, format_address, parse_address};
 
 /// How long a sentinel may take to connect and answer.
 const SENTINEL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -292,7 +289,7 @@ impl Sentinel {
 
 impl ConnectionLike for Sentinel {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        let write = is_write(cmd);
+        let write = may_write(cmd);
         Box::pin(async move {
             if write {
                 self.check_if_idle().await;
@@ -312,7 +309,7 @@ impl ConnectionLike for Sentinel {
         offset: usize,
         count: usize,
     ) -> RedisFuture<'a, Vec<Value>> {
-        let write = pipeline.cmd_iter().any(is_write);
+        let write = pipeline.cmd_iter().any(may_write);
         Box::pin(async move {
             if write {
                 self.check_if_idle().await;
@@ -331,20 +328,6 @@ impl ConnectionLike for Sentinel {
     fn get_db(&self) -> i64 {
         i64::from(self.inner.config.db)
     }
-}
-
-/// Whether a command may change data: anything the command table does not
-/// know to be a read counts.
-fn is_write(cmd: &Cmd) -> bool {
-    let argv: Vec<String> = cmd
-        .args_iter()
-        .take(2)
-        .filter_map(|arg| match arg {
-            redis::Arg::Simple(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-            _ => None,
-        })
-        .collect();
-    commands::classify(&argv) != CommandClass::Read
 }
 
 fn error_sign(err: &RedisError) -> Option<Sign> {
@@ -526,7 +509,7 @@ mod tests {
             "MEMORY USAGE k",
             "XRANGE s - +",
         ] {
-            assert!(!is_write(&command(read)), "{read}");
+            assert!(!may_write(&command(read)), "{read}");
         }
         for write in [
             "SET k v",
@@ -537,7 +520,7 @@ mod tests {
             "MULTI",
             "CONFIG SET a b",
         ] {
-            assert!(is_write(&command(write)), "{write}");
+            assert!(may_write(&command(write)), "{write}");
         }
     }
 

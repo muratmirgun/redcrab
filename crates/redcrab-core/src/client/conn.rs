@@ -9,6 +9,22 @@ use super::{
     cluster::{Cluster, ClusterNode},
     sentinel::Sentinel,
 };
+use crate::commands::{self, CommandClass};
+
+/// Whether a command may change data: anything the command table does not
+/// know to be a read counts. Such a command is never sent twice on the
+/// connection's own initiative: after a lost connection it may have run.
+pub(crate) fn may_write(cmd: &Cmd) -> bool {
+    let argv: Vec<String> = cmd
+        .args_iter()
+        .take(2)
+        .filter_map(|arg| match arg {
+            redis::Arg::Simple(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect();
+    commands::classify(&argv) != CommandClass::Read
+}
 
 /// How a [`Client`](super::Client) reaches the server. Every request goes
 /// through this type, never through a concrete connection, so that

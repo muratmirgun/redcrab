@@ -11,13 +11,13 @@ use anyhow::Result;
 use redis::{
     AsyncConnectionConfig, Cmd, Pipeline, RedisFuture, RedisResult, Value,
     aio::{ConnectionLike, MultiplexedConnection},
-    cluster::ClusterClient,
     cluster_async::ClusterConnection,
     cluster_routing::{RoutingInfo, SingleNodeRoutingInfo},
 };
 
 use super::{
-    cluster::{Cluster, is_topology_error, routes_to_any_node},
+    cluster::{Cluster, ConsoleClients, is_topology_error, routes_to_any_node, write_once},
+    conn::may_write,
     connect_error,
     sentinel::Sentinel,
 };
@@ -35,11 +35,11 @@ pub(crate) enum Connector {
         redis: Arc<redis::Client>,
         tunnel: Option<Arc<Tunnel>>,
     },
-    /// A cluster: a cluster connection of its own, routing by key, and the
-    /// app's view of the cluster, for the primary that commands without a
-    /// key go to.
+    /// A cluster: cluster connections of its own, routing by key (one for
+    /// reads, one that never re-sends for writes), and the app's view of
+    /// the cluster, for the primary that commands without a key go to.
     Cluster {
-        client: Arc<ClusterClient>,
+        client: Arc<ConsoleClients>,
         cluster: Cluster,
     },
     /// Whatever master the sentinels name at the time of connecting.
@@ -60,9 +60,14 @@ pub(crate) enum OwnConn {
 /// than to whichever node redis-rs picks, replicas included. Commands that
 /// redis-rs sends to several nodes and combines (DBSIZE, KEYS, INFO, ...)
 /// still are.
+///
+/// Writes go over a connection of their own that redis-rs never re-sends
+/// on, so a write whose connection broke after it ran is not run twice
+/// (see [`write_once`]).
 #[derive(Clone)]
 pub(crate) struct ClusterConsole {
     con: ClusterConnection,
+    writer: ClusterConnection,
     cluster: Cluster,
     seed: (String, u16),
 }
@@ -81,14 +86,23 @@ impl ClusterConsole {
         } else {
             None
         };
+        let write = may_write(cmd);
         let Some((node, generation)) = home else {
-            return self.con.req_packed_command(cmd).await;
+            return if write {
+                write_once(&mut self.writer, cmd, None).await
+            } else {
+                self.con.req_packed_command(cmd).await
+            };
         };
         let route = RoutingInfo::SingleNode(SingleNodeRoutingInfo::ByAddress {
             host: node.host,
             port: node.port,
         });
-        let result = self.con.route_command(cmd.clone(), route).await;
+        let result = if write {
+            write_once(&mut self.writer, cmd, Some(route)).await
+        } else {
+            self.con.route_command(cmd.clone(), route).await
+        };
         if let Err(err) = &result
             && is_topology_error(err)
         {
@@ -153,12 +167,19 @@ impl Connector {
                     })
             }
             Self::Cluster { client, cluster } => {
-                let connecting = client.get_async_connection();
+                let connecting = async {
+                    let (con, writer) = futures::join!(
+                        client.reads.get_async_connection(),
+                        client.writes.get_async_connection()
+                    );
+                    Ok::<_, redis::RedisError>((con?, writer?))
+                };
                 match tokio::time::timeout(connect_timeout * 2, connecting).await {
                     Ok(con) => con
-                        .map(|con| {
+                        .map(|(con, writer)| {
                             OwnConn::Cluster(ClusterConsole {
                                 con,
+                                writer,
                                 cluster: cluster.clone(),
                                 seed: (config.host.trim().to_string(), config.port),
                             })
@@ -204,7 +225,19 @@ impl ConnectionLike for OwnConn {
     ) -> RedisFuture<'a, Vec<Value>> {
         match self {
             Self::Plain(con) => con.req_packed_commands(pipeline, offset, count),
-            Self::Cluster(console) => console.con.req_packed_commands(pipeline, offset, count),
+            Self::Cluster(console) => {
+                if pipeline.cmd_iter().any(may_write) {
+                    Box::pin(async move {
+                        console
+                            .writer
+                            .req_packed_commands(pipeline, offset, count)
+                            .await
+                            .map_err(super::cluster::write_error)
+                    })
+                } else {
+                    console.con.req_packed_commands(pipeline, offset, count)
+                }
+            }
         }
     }
 

@@ -8,6 +8,15 @@
 //! Which primary owns which slot comes from `CLUSTER SHARDS` (or `CLUSTER
 //! SLOTS` on servers older than 7), and is read again when a call routed to
 //! a node fails in a way that says the layout changed.
+//!
+//! redis-rs re-sends a request whose connection dropped, with no regard for
+//! what it does. That is fine for a read, but a write that ran before the
+//! connection broke would run twice (an element removed or added twice, an
+//! INCR applied twice). So writes go over a connection of their own that
+//! never re-sends ([`write_once`]): they are sent again only while the
+//! cluster refuses them without running them (MOVED, ASK, TRYAGAIN, ...),
+//! and a write whose connection broke fails with an error saying it may or
+//! may not have run, as Sentinel's does.
 
 use std::{
     sync::{
@@ -28,7 +37,7 @@ use redis::{
     cmd,
 };
 
-use super::connect_error;
+use super::{conn::may_write, connect_error};
 use crate::config::{ConnectionConfig, Target, parse_address};
 
 /// Slots in a cluster's keyspace.
@@ -484,11 +493,138 @@ fn is_topology_reply(value: &Value) -> bool {
     )
 }
 
-/// The cluster's connection and the slot layout, shared by every clone.
+/// Whether a failed request certainly did not run: the cluster refused it
+/// for its layout (a slot that moved or is moving, a failover under way, a
+/// primary that became a replica) or it never reached a node.
+pub(crate) fn never_ran(err: &RedisError) -> bool {
+    err.kind() == ErrorKind::ClusterConnectionNotFound
+        || err.is_connection_refusal()
+        || matches!(
+            err.code(),
+            Some("MOVED" | "ASK" | "TRYAGAIN" | "CLUSTERDOWN" | "READONLY")
+        )
+}
+
+/// A write's error as the caller should see it: one whose connection broke
+/// or whose reply did not come says that the write may have run.
+pub(crate) fn write_error(err: RedisError) -> RedisError {
+    let unanswered = err.is_io_error()
+        || err.is_connection_dropped()
+        || err.is_timeout()
+        || err.is_unrecoverable_error();
+    if never_ran(&err) || !unanswered {
+        return err;
+    }
+    RedisError::from((
+        ErrorKind::Io,
+        "the connection to the cluster broke while a write was on its way, so it may or may not have run; check, then try again",
+        err.to_string(),
+    ))
+}
+
+/// Times a write the cluster refused without running it is sent; a pause
+/// before each further one, doubling, unless the refusal names the node
+/// to go to.
+const WRITE_ATTEMPTS: u32 = 4;
+const WRITE_PAUSE: Duration = Duration::from_millis(100);
+
+/// Sends a write on `con`, a connection that never re-sends on its own
+/// (see [`Cluster::connect`]), routed by redis-rs or by `route`. It is
+/// sent again only after a refusal that says it did not run, to the node
+/// a MOVED or ASK names; any other failure is returned, through
+/// [`write_error`].
+pub(crate) async fn write_once(
+    con: &mut ClusterConnection,
+    cmd: &Cmd,
+    route: Option<RoutingInfo>,
+) -> RedisResult<Value> {
+    // The node a refusal named, and whether it was an ASK.
+    let mut redirect: Option<(Node, bool)> = None;
+    let mut attempt = 1;
+    loop {
+        let result = match (&redirect, &route) {
+            (Some((node, false)), _) => con.route_command(cmd.clone(), node.routing()).await,
+            (Some((node, true)), _) => {
+                let mut asking = Pipeline::with_capacity(2);
+                asking.cmd("ASKING").add_command(cmd.clone());
+                con.route_pipeline(asking, 1, 1, node.single_routing())
+                    .await
+                    .and_then(|mut replies| {
+                        replies.pop().ok_or_else(|| {
+                            RedisError::from((ErrorKind::Parse, "no reply after ASKING"))
+                        })
+                    })
+            }
+            (None, Some(route)) => con.route_command(cmd.clone(), route.clone()).await,
+            (None, None) => con.req_packed_command(cmd).await,
+        };
+        let err = match result {
+            Ok(value) => return Ok(value),
+            Err(err) => err,
+        };
+        if !never_ran(&err) || attempt >= WRITE_ATTEMPTS {
+            return Err(write_error(err));
+        }
+        redirect = err
+            .redirect_node()
+            .and_then(|(address, _)| parse_address(address).ok())
+            .map(|(host, port)| (Node { host, port }, err.code() == Some("ASK")));
+        if redirect.is_none() {
+            // redis-rs reads the layout again on its own meanwhile.
+            tokio::time::sleep(WRITE_PAUSE * 2u32.pow(attempt - 1)).await;
+        }
+        attempt += 1;
+    }
+}
+
+/// Sends a pipeline with writes on `con` once: its commands may have run
+/// in part whatever the error, so it is never sent again.
+async fn write_pipeline_once(
+    con: &mut ClusterConnection,
+    pipeline: &Pipeline,
+    offset: usize,
+    count: usize,
+    route: Option<SingleNodeRoutingInfo>,
+) -> RedisResult<Vec<Value>> {
+    let result = match route {
+        Some(route) => {
+            con.route_pipeline(pipeline.clone(), offset, count, route)
+                .await
+        }
+        None => con.req_packed_commands(pipeline, offset, count).await,
+    };
+    result.map_err(write_error)
+}
+
+impl Node {
+    fn single_routing(&self) -> SingleNodeRoutingInfo {
+        SingleNodeRoutingInfo::ByAddress {
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
+
+    fn routing(&self) -> RoutingInfo {
+        RoutingInfo::SingleNode(self.single_routing())
+    }
+}
+
+/// The cluster's connections and the slot layout, shared by every clone.
 #[derive(Clone)]
 pub(crate) struct Cluster {
+    /// For reads: redis-rs follows redirects and re-sends after a lost
+    /// connection.
     con: ClusterConnection,
+    /// For writes: never re-sent by redis-rs (see [`write_once`]).
+    writer: ClusterConnection,
     layout: Arc<Layout>,
+}
+
+/// The clients the console opens its own cluster connections with: one
+/// for reads, one for writes, as [`Cluster`] has.
+pub(crate) struct ConsoleClients {
+    pub(crate) reads: ClusterClient,
+    pub(crate) writes: ClusterClient,
 }
 
 struct Layout {
@@ -506,11 +642,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Cluster {
     /// Connects to the cluster through its seed nodes (`host`/`port`, then
-    /// the configured seeds) and reads its layout. Also returns a client
-    /// for connections of the console's own, which has no response timeout
-    /// of its own (the console applies one per command, and blocking
-    /// commands must be able to wait).
-    pub(crate) async fn connect(config: &ConnectionConfig) -> Result<(Self, ClusterClient)> {
+    /// the configured seeds) and reads its layout. Also returns clients
+    /// for connections of the console's own, which have no response
+    /// timeout of their own (the console applies one per command, and
+    /// blocking commands must be able to wait).
+    ///
+    /// Each comes in two: one that redis-rs re-sends requests on after a
+    /// lost connection (for reads), and one built with no retries at all
+    /// (for writes, see [`write_once`]).
+    pub(crate) async fn connect(config: &ConnectionConfig) -> Result<(Self, ConsoleClients)> {
         let seeds = seeds(config)?;
         let target = config.route_label();
         let builder = |seeds: Vec<redis::ConnectionInfo>| -> Result<ClusterClientBuilder> {
@@ -527,17 +667,27 @@ impl Cluster {
         let app = builder(seeds.clone())?
             .response_timeout(RESPONSE_TIMEOUT)
             .build()?;
-        let console = builder(seeds)?.build()?;
-        let con = app
-            .get_async_connection()
-            .await
-            .map_err(|err| cluster_connect_error(err, config, &target))?;
+        let app_writes = builder(seeds.clone())?
+            .retries(0)
+            .response_timeout(RESPONSE_TIMEOUT)
+            .build()?;
+        let console = ConsoleClients {
+            reads: builder(seeds.clone())?.build()?,
+            writes: builder(seeds)?.retries(0).build()?,
+        };
+        let (con, writer) = futures::join!(
+            app.get_async_connection(),
+            app_writes.get_async_connection()
+        );
+        let failed = |err| cluster_connect_error(err, config, &target);
+        let (con, writer) = (con.map_err(failed)?, writer.map_err(failed)?);
         let tls = config.tls.is_some();
         let shards = fetch_shards(&mut con.clone(), tls)
             .await
             .map_err(|err| cluster_connect_error(err, config, &target))?;
         let cluster = Self {
             con,
+            writer,
             layout: Arc::new(Layout {
                 shards: RwLock::new(Arc::new(shards)),
                 generation: AtomicU64::new(0),
@@ -684,17 +834,24 @@ impl Cluster {
                     for &ix in &batch {
                         build(&mut pipe, keys[ix]);
                     }
-                    let mut con = self.con.clone();
+                    // Writes (UNLINK) are never re-sent after a lost
+                    // connection; see `write_once`.
+                    let writes = pipe.cmd_iter().any(may_write);
+                    let mut con = if writes {
+                        self.writer.clone()
+                    } else {
+                        self.con.clone()
+                    };
                     async move {
                         let count = batch.len() * per_key;
                         let result = con.route_pipeline(pipe, 0, count, route).await;
-                        (batch, result)
+                        (batch, result, writes)
                     }
                 })
             });
             let results = join_all(requests).await;
             pending.clear();
-            for (batch, result) in results {
+            for (batch, result, writes) in results {
                 match result {
                     Ok(values) if values.len() == batch.len() * per_key => {
                         for (ix, chunk) in batch.iter().zip(values.chunks(per_key)) {
@@ -713,10 +870,16 @@ impl Cluster {
                         )));
                     }
                     Err(err) => {
-                        if attempt == 0 && is_topology_error(&err) {
+                        // A write is sent again only if it did not run.
+                        let again = if writes {
+                            never_ran(&err)
+                        } else {
+                            is_topology_error(&err)
+                        };
+                        if attempt == 0 && again {
                             pending.extend(batch);
                         }
-                        failure = Some(err);
+                        failure = Some(if writes { write_error(err) } else { err });
                     }
                 }
             }
@@ -743,7 +906,11 @@ impl Cluster {
 
 impl ConnectionLike for Cluster {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> RedisFuture<'a, Value> {
-        self.con.req_packed_command(cmd)
+        if may_write(cmd) {
+            Box::pin(write_once(&mut self.writer, cmd, None))
+        } else {
+            self.con.req_packed_command(cmd)
+        }
     }
 
     fn req_packed_commands<'a>(
@@ -752,7 +919,17 @@ impl ConnectionLike for Cluster {
         offset: usize,
         count: usize,
     ) -> RedisFuture<'a, Vec<Value>> {
-        self.con.req_packed_commands(pipeline, offset, count)
+        if pipeline.cmd_iter().any(may_write) {
+            Box::pin(write_pipeline_once(
+                &mut self.writer,
+                pipeline,
+                offset,
+                count,
+                None,
+            ))
+        } else {
+            self.con.req_packed_commands(pipeline, offset, count)
+        }
     }
 
     fn get_db(&self) -> i64 {
@@ -801,7 +978,16 @@ impl ConnectionLike for ClusterNode {
         Box::pin(async move {
             let (_, generation) = self.cluster.shards();
             let route = RoutingInfo::SingleNode(self.route());
-            let result = self.cluster.con.route_command(cmd.clone(), route).await;
+            let result = if may_write(cmd) {
+                // Not even after a refusal: this node's keys are the point.
+                let mut writer = self.cluster.writer.clone();
+                writer
+                    .route_command(cmd.clone(), route)
+                    .await
+                    .map_err(write_error)
+            } else {
+                self.cluster.con.route_command(cmd.clone(), route).await
+            };
             if let Err(err) = &result {
                 self.after_failure(err, generation).await;
             }
@@ -818,11 +1004,15 @@ impl ConnectionLike for ClusterNode {
         Box::pin(async move {
             let (_, generation) = self.cluster.shards();
             let route = self.route();
-            let result = self
-                .cluster
-                .con
-                .route_pipeline(pipeline.clone(), offset, count, route)
-                .await;
+            let result = if pipeline.cmd_iter().any(may_write) {
+                let mut writer = self.cluster.writer.clone();
+                write_pipeline_once(&mut writer, pipeline, offset, count, Some(route)).await
+            } else {
+                self.cluster
+                    .con
+                    .route_pipeline(pipeline.clone(), offset, count, route)
+                    .await
+            };
             if let Err(err) = &result {
                 self.after_failure(err, generation).await;
             }
@@ -923,9 +1113,174 @@ fn cluster_connect_error(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use futures::executor::block_on;
     use proptest::prelude::*;
+    use tokio::{
+        io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
+        net::{TcpListener, TcpStream},
+    };
 
     use super::*;
+    use crate::{
+        client::{Client, Key},
+        config::Topology,
+        runtime::runtime,
+    };
+
+    /// A one-node cluster of the test's own, owning every slot. It records
+    /// the name of every command it gets; the first command named in
+    /// `lose` it runs but never answers (it closes the connection, as a
+    /// node restart or a network reset after the command ran does); the
+    /// first SET it refuses with MOVED to itself.
+    struct FakeNode {
+        port: u16,
+        log: Arc<Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl FakeNode {
+        fn start(lose: &'static [&'static str]) -> Self {
+            let listener = runtime()
+                .block_on(TcpListener::bind("127.0.0.1:0"))
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let lost = Arc::new(Mutex::new(Vec::<String>::new()));
+            let task = runtime().spawn({
+                let log = log.clone();
+                async move {
+                    while let Ok((socket, _)) = listener.accept().await {
+                        tokio::spawn(Self::serve(socket, port, lose, log.clone(), lost.clone()));
+                    }
+                }
+            });
+            Self { port, log, task }
+        }
+
+        async fn serve(
+            socket: TcpStream,
+            port: u16,
+            lose: &'static [&'static str],
+            log: Arc<Mutex<Vec<String>>>,
+            lost: Arc<Mutex<Vec<String>>>,
+        ) {
+            let (read, mut write) = socket.into_split();
+            let mut read = BufReader::new(read);
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let Some(count) = line.trim().strip_prefix('*').and_then(|n| n.parse().ok()) else {
+                    return;
+                };
+                let mut argv: Vec<String> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    line.clear();
+                    read.read_line(&mut line).await.unwrap();
+                    let len: usize = line.trim()[1..].parse().unwrap();
+                    let mut arg = vec![0; len + 2];
+                    read.read_exact(&mut arg).await.unwrap();
+                    arg.truncate(len);
+                    argv.push(String::from_utf8_lossy(&arg).to_ascii_uppercase());
+                }
+                let name = argv[0].clone();
+                log.lock().unwrap().push(name.clone());
+                let first = |what: &str| {
+                    let mut lost = lost.lock().unwrap();
+                    let first = !lost.iter().any(|seen| seen == what);
+                    if first {
+                        lost.push(what.to_string());
+                    }
+                    first
+                };
+                let reply = match (name.as_str(), argv.get(1).map(String::as_str)) {
+                    (name, _) if lose.contains(&name) && first(name) => return,
+                    ("SET", _) if first("SET") => format!("-MOVED 1 127.0.0.1:{port}\r\n"),
+                    ("CLUSTER", Some("SLOTS")) => format!(
+                        "*1\r\n*3\r\n:0\r\n:16383\r\n*3\r\n$9\r\n127.0.0.1\r\n:{port}\r\n$4\r\nnode\r\n"
+                    ),
+                    ("CLUSTER", _) => "-ERR unknown subcommand\r\n".into(),
+                    ("PING", _) => "+PONG\r\n".into(),
+                    ("GET", _) => "$1\r\nv\r\n".into(),
+                    ("INCR" | "EVAL", _) => ":1\r\n".into(),
+                    _ => "+OK\r\n".into(),
+                };
+                if write.write_all(reply.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        fn config(&self) -> ConnectionConfig {
+            ConnectionConfig {
+                name: "fake-cluster".into(),
+                host: "127.0.0.1".into(),
+                port: self.port,
+                topology: Topology::Cluster { seeds: Vec::new() },
+                ..ConnectionConfig::default()
+            }
+        }
+
+        fn count(&self, name: &str) -> usize {
+            self.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|n| *n == name)
+                .count()
+        }
+    }
+
+    impl Drop for FakeNode {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// A write that ran but whose reply was lost is not sent again: run
+    /// twice, removing a list element or an INCR would apply twice. Reads
+    /// are still sent again, and a write the cluster refused without
+    /// running it (MOVED) still goes where the refusal says.
+    #[test]
+    fn writes_are_never_sent_twice_after_a_lost_connection() {
+        let node = FakeNode::start(&["EVAL", "INCR", "GET"]);
+        let client = block_on(Client::connect(node.config())).unwrap();
+
+        let err = block_on(client.list_remove_at(Key::from(&b"l"[..]), vec![(0, b"a".to_vec())]))
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("may or may not have run"),
+            "{err:#}"
+        );
+        assert_eq!(node.count("EVAL"), 1, "{:?}", node.log.lock().unwrap());
+
+        let console = client.console();
+        let err = block_on(console.exec(["INCR", "counter"])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("may or may not have run"),
+            "{err:#}"
+        );
+        assert_eq!(node.count("INCR"), 1, "{:?}", node.log.lock().unwrap());
+
+        // A read whose connection broke is sent again, and answered.
+        assert_eq!(
+            block_on(console.exec(["GET", "k"])).unwrap(),
+            Value::BulkString(b"v".to_vec())
+        );
+        assert_eq!(node.count("GET"), 2);
+        // A refused write follows MOVED.
+        assert_eq!(
+            block_on(console.exec(["SET", "k", "v"])).unwrap(),
+            Value::Okay
+        );
+        assert_eq!(node.count("SET"), 2);
+        // The app's writes too.
+        block_on(client.set_ttl(Key::from(&b"k"[..]), None)).ok();
+        assert_eq!(node.count("PERSIST"), 1);
+    }
 
     #[test]
     fn slots_match_redis() {
