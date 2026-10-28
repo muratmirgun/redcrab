@@ -161,6 +161,10 @@ impl Workspace {
                     .child(div().size(px(7.)).rounded_full().bg(dot))
                     .child(if self.online { "Connected" } else { "Offline" }),
             )
+            // How it is connected: "cluster · 3 primaries", "sentinel ·
+            // mymaster @ 10.0.0.5:6379", "via SSH ops@bastion". Live, and
+            // cheap to ask for on every frame.
+            .children(self.client.topology_summary().into_iter().map(item))
             // Only what the server told: a user without INFO sees none of it.
             .children(
                 self.info

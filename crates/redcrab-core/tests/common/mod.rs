@@ -28,7 +28,7 @@ pub use futures::executor::block_on;
 use futures::{Stream, StreamExt as _};
 use redcrab_core::{
     Client, ConnectionConfig, ConsoleSession, Key, KeyTree, RawValue, ReadOnlyError, ScanEvent,
-    ScanOptions, TlsConfig, browser,
+    ScanOptions, TlsConfig, Topology, browser,
 };
 use redis::{ConnectionAddr, IntoConnectionInfo as _, RedisConnectionInfo};
 
@@ -67,10 +67,23 @@ pub enum Server {
     Tls,
     /// 6403, TLS only, client certificate required.
     Mtls,
+    /// 7000-7005: three primaries with a replica each.
+    Cluster,
+    /// Sentinel on 26410 watching `mymaster` (6410 / 6411, either may be
+    /// the master: the failover test switches them). Only lane A's tests
+    /// use it.
+    Sentinel,
 }
 
 impl Server {
-    pub const ALL: [Self; 4] = [Self::Standalone, Self::Auth, Self::Tls, Self::Mtls];
+    pub const ALL: [Self; 6] = [
+        Self::Standalone,
+        Self::Auth,
+        Self::Tls,
+        Self::Mtls,
+        Self::Cluster,
+        Self::Sentinel,
+    ];
 
     pub fn port(self) -> u16 {
         match self {
@@ -78,6 +91,8 @@ impl Server {
             Self::Auth => 6401,
             Self::Tls => 6402,
             Self::Mtls => 6403,
+            Self::Cluster => 7000,
+            Self::Sentinel => SENTINEL_PORT,
         }
     }
 
@@ -104,16 +119,97 @@ impl Server {
                 tls: Some(client_certificate()),
                 ..config
             },
+            Self::Cluster => ConnectionConfig {
+                topology: Topology::Cluster {
+                    seeds: vec!["127.0.0.1:7001".into(), "127.0.0.1:7002".into()],
+                },
+                ..config
+            },
+            Self::Sentinel => ConnectionConfig {
+                topology: Topology::Sentinel {
+                    master: SENTINEL_MASTER.into(),
+                    sentinels: vec![format!("127.0.0.1:{SENTINEL_PORT}")],
+                    sentinel_username: None,
+                    sentinel_tls: false,
+                },
+                ..config
+            },
         }
     }
 
     /// The server `config` points at, if it is one of the environment's.
     fn of(config: &ConnectionConfig) -> Option<Self> {
+        if config.ssh.is_some() || config.unix_socket.is_some() {
+            return None;
+        }
+        match &config.topology {
+            Topology::Sentinel { .. } => return Some(Self::Sentinel),
+            Topology::Cluster { .. } => return Some(Self::Cluster),
+            Topology::Standalone => {}
+        }
         let local = matches!(config.host.as_str(), "127.0.0.1" | "localhost");
         Self::ALL
             .into_iter()
             .find(|server| local && server.port() == config.port)
     }
+}
+
+/// The cluster's nodes.
+pub const CLUSTER_PORTS: [u16; 6] = [7000, 7001, 7002, 7003, 7004, 7005];
+/// The Sentinel test service: one sentinel watching a master and a replica.
+pub const SENTINEL_PORT: u16 = 26410;
+pub const SENTINEL_MASTER: &str = "mymaster";
+pub const SENTINEL_NODES: [u16; 2] = [6410, 6411];
+
+pub fn cluster() -> ConnectionConfig {
+    Server::Cluster.admin()
+}
+
+pub fn sentinel() -> ConnectionConfig {
+    Server::Sentinel.admin()
+}
+
+/// A plain connection to one node of the cluster or the Sentinel service.
+pub fn node(port: u16) -> redis::Connection {
+    redis::Client::open(format!("redis://127.0.0.1:{port}"))
+        .and_then(|client| client.get_connection_with_timeout(Duration::from_secs(5)))
+        .unwrap_or_else(|err| {
+            panic!("could not reach 127.0.0.1:{port} ({err:#}); is scripts/test-env.sh up?")
+        })
+}
+
+/// A cluster connection with every permission, routing by key.
+pub fn cluster_connection() -> redis::cluster::ClusterConnection {
+    redis::cluster::ClusterClient::new(vec!["redis://127.0.0.1:7000", "redis://127.0.0.1:7001"])
+        .and_then(|client| client.get_connection())
+        .unwrap_or_else(|err| {
+            panic!("could not reach the cluster ({err:#}); is scripts/test-env.sh up?")
+        })
+}
+
+/// The first word of ROLE: `master`, `slave` or `sentinel`.
+pub fn role(con: &mut redis::Connection) -> String {
+    let role: Vec<redis::Value> = redis::cmd("ROLE").query(con).expect("ROLE");
+    match role.first() {
+        Some(redis::Value::BulkString(role)) => String::from_utf8_lossy(role).into_owned(),
+        other => panic!("ROLE: {other:?}"),
+    }
+}
+
+/// The ports of the cluster's primaries, as they report themselves.
+pub fn cluster_primaries() -> Vec<u16> {
+    CLUSTER_PORTS
+        .into_iter()
+        .filter(|&port| role(&mut node(port)) == "master")
+        .collect()
+}
+
+/// The port of the Sentinel service's current master.
+pub fn sentinel_master() -> u16 {
+    SENTINEL_NODES
+        .into_iter()
+        .find(|&port| role(&mut node(port)) == "master")
+        .expect("the sentinel service has no master")
 }
 
 pub fn standalone() -> ConnectionConfig {
@@ -288,6 +384,18 @@ impl It {
     pub fn seed0(&self) -> redis::Connection {
         self.seed(Server::Standalone, 0)
     }
+
+    /// A cluster connection with every permission, routing by key.
+    pub fn seed_cluster(&self) -> redis::cluster::ClusterConnection {
+        self.uses(Server::Cluster, 0);
+        cluster_connection()
+    }
+
+    /// A plain connection to the Sentinel service's current master.
+    pub fn seed_sentinel(&self) -> redis::Connection {
+        self.uses(Server::Sentinel, 0);
+        node(sentinel_master())
+    }
 }
 
 impl Drop for It {
@@ -313,7 +421,24 @@ fn unique_prefix(namespace: &str, test: &str) -> String {
 }
 
 fn remove_matching(server: Server, db: u32, pattern: &str) -> Result<()> {
-    let mut con = raw_client(server, db)?.get_connection_with_timeout(Duration::from_secs(5))?;
+    let ports = match server {
+        // Each primary holds its own keys; one UNLINK per key, since keys
+        // in different slots cannot share one.
+        Server::Cluster => cluster_primaries(),
+        Server::Sentinel => vec![sentinel_master()],
+        _ => {
+            let mut con =
+                raw_client(server, db)?.get_connection_with_timeout(Duration::from_secs(5))?;
+            return remove_from(&mut con, pattern, false);
+        }
+    };
+    for port in ports {
+        remove_from(&mut node(port), pattern, server == Server::Cluster)?;
+    }
+    Ok(())
+}
+
+fn remove_from(con: &mut redis::Connection, pattern: &str, per_key: bool) -> Result<()> {
     let mut cursor = 0u64;
     loop {
         let (next, keys): (u64, Vec<Vec<u8>>) = redis::cmd("SCAN")
@@ -322,9 +447,19 @@ fn remove_matching(server: Server, db: u32, pattern: &str) -> Result<()> {
             .arg(pattern)
             .arg("COUNT")
             .arg(1000)
-            .query(&mut con)?;
-        for chunk in keys.chunks(500) {
-            redis::cmd("UNLINK").arg(chunk).query::<()>(&mut con)?;
+            .query(con)?;
+        if per_key {
+            if !keys.is_empty() {
+                let mut p = redis::pipe();
+                for key in &keys {
+                    p.cmd("UNLINK").arg(key).ignore();
+                }
+                p.query::<()>(con)?;
+            }
+        } else {
+            for chunk in keys.chunks(500) {
+                redis::cmd("UNLINK").arg(chunk).query::<()>(con)?;
+            }
         }
         if next == 0 {
             return Ok(());

@@ -8,15 +8,23 @@ pub mod browser;
 mod client;
 pub mod commands;
 mod config;
+pub mod form;
 pub mod format;
 mod runtime;
+pub mod ssh;
 pub mod store;
 mod tree;
 mod value;
 pub mod viewer;
 
-pub use client::{Client, ConsoleSession, Key, ReadOnlyError, ScanEvent, ScanOptions, ServerInfo};
-pub use config::{ConnectionConfig, Environment, TlsConfig};
+pub use client::{
+    Client, ConnectOptions, ConsoleSession, Key, ReadOnlyError, ScanEvent, ScanOptions, ServerInfo,
+    key_slot,
+};
+pub use config::{
+    ConfigField, ConnectionConfig, Environment, HostKeyPolicy, InvalidConfig, SshAuth, SshConfig,
+    TlsConfig, Topology, UNIX_SOCKETS, format_address, parse_address, split_addresses,
+};
 pub use redis::Value as RawValue;
 pub use tree::{KeyTree, NodeId, Row, RowKind};
 pub use value::{Cursor, KeyMeta, KeyType, StreamEntry, ValueData, ValuePage};

@@ -1,6 +1,15 @@
 //! The console's own session: a dedicated connection used one command at a
 //! time, like `redis-cli`, so that SELECT, MULTI/EXEC or WATCH typed into
 //! the console stay in the console.
+//!
+//! On a cluster the console's connection routes each command by its key, as
+//! `redis-cli -c` does, and sends commands without a key (ROLE, TIME,
+//! CONFIG GET, ...) to one primary: the seed node when it is one, so they
+//! describe the same node each time. SELECT and transactions are refused
+//! there, since a cluster has one database and a transaction needs all its
+//! keys on one node, and so is SCAN, whose cursor belongs to one node while
+//! the keys are spread over all primaries. Behind Sentinel it connects to
+//! the current master, and to the new one after a failover.
 
 use std::{
     borrow::Cow,
@@ -15,14 +24,13 @@ use std::{
 };
 
 use anyhow::{Result, anyhow, bail};
-use redis::{
-    AsyncConnectionConfig, Cmd, ErrorKind, Value,
-    aio::{ConnectionLike as _, MultiplexedConnection},
-    cmd,
-};
+use redis::{Cmd, ErrorKind, Value, aio::ConnectionLike as _, cmd};
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use super::{ReadOnlyError, connect_error};
+use super::{
+    ReadOnlyError,
+    connector::{Connector, OwnConn},
+};
 use crate::{
     commands::{self, CommandClass, CommandSpec, Flags},
     config::ConnectionConfig,
@@ -70,7 +78,7 @@ struct Request {
 }
 
 impl ConsoleSession {
-    pub(crate) fn new(redis: Arc<redis::Client>, config: Arc<ConnectionConfig>) -> Self {
+    pub(crate) fn new(connector: Connector, config: Arc<ConnectionConfig>) -> Self {
         let db = i64::from(config.db);
         let shared = Arc::new(Shared {
             cancel: Notify::new(),
@@ -81,7 +89,7 @@ impl ConsoleSession {
         });
         let (requests, queue) = mpsc::unbounded_channel();
         let session = Session {
-            redis,
+            connector,
             config,
             shared: shared.clone(),
             con: None,
@@ -100,8 +108,9 @@ impl ConsoleSession {
     /// Refused without reaching the server: on a read-only connection,
     /// anything but reads and the transaction commands (with a
     /// [`ReadOnlyError`]); on any connection, commands the console cannot
-    /// follow (SUBSCRIBE, MONITOR, RESET, HELLO, ...). A command refused
-    /// inside MULTI makes EXEC fail, as a command the server rejects would.
+    /// follow (SUBSCRIBE, MONITOR, RESET, HELLO, ...); on a cluster, SELECT
+    /// and the transaction commands. A command refused inside MULTI makes
+    /// EXEC fail, as a command the server rejects would.
     pub fn exec<A: Into<Vec<u8>>>(
         &self,
         argv: impl IntoIterator<Item = A>,
@@ -164,7 +173,7 @@ fn text(arg: &[u8]) -> Cow<'_, str> {
 
 /// Decides whether the console may send `argv`. Returns the command's table
 /// entry (`None` for commands the table does not know), or why it is refused.
-fn check(argv: &[Vec<u8>], read_only: bool) -> Result<Option<&'static CommandSpec>> {
+fn check(argv: &[Vec<u8>], read_only: bool, cluster: bool) -> Result<Option<&'static CommandSpec>> {
     let Some(name) = argv.first() else {
         bail!("empty command");
     };
@@ -174,6 +183,15 @@ fn check(argv: &[Vec<u8>], read_only: bool) -> Result<Option<&'static CommandSpe
         && let Some(reason) = unsupported(spec.name)
     {
         bail!("{} is not available in the console: {reason}", spec.name);
+    }
+    if let Some(spec) = spec
+        && cluster
+        && let Some(reason) = unsupported_in_cluster(spec.name)
+    {
+        bail!(
+            "{} is not available in the console of a cluster: {reason}",
+            spec.name
+        );
     }
     let class = spec.map_or(CommandClass::Unknown, CommandSpec::class);
     let allowed = match class {
@@ -216,6 +234,20 @@ fn unsupported(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Why the console of a cluster cannot run a command.
+fn unsupported_in_cluster(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "SELECT" => "a cluster has only database 0",
+        "MULTI" | "EXEC" | "DISCARD" | "WATCH" | "UNWATCH" => {
+            "a transaction needs all its keys on one node, while the console sends each command to the node of its key"
+        }
+        "SCAN" => {
+            "each primary holds part of the keys and has a cursor of its own, so one SCAN sees only some of them; the key browser scans every primary (KEYS asks them all too, but blocks each while it runs)"
+        }
+        _ => return None,
+    })
+}
+
 /// Upper-cased name of a command the table does not know, with its
 /// subcommand when it was typed under a known container (`CONFIG BOGUS`).
 fn display_name(argv: &[Vec<u8>]) -> String {
@@ -241,10 +273,10 @@ fn reply_error(err: redis::RedisError) -> anyhow::Error {
 
 /// The task that owns the console's connection.
 struct Session {
-    redis: Arc<redis::Client>,
+    connector: Connector,
     config: Arc<ConnectionConfig>,
     shared: Arc<Shared>,
-    con: Option<MultiplexedConnection>,
+    con: Option<OwnConn>,
     /// The selected database, restored when the connection is reopened.
     db: i64,
     transaction: Option<Transaction>,
@@ -308,7 +340,7 @@ impl Session {
     }
 
     async fn exec(&mut self, argv: &[Vec<u8>]) -> Result<Value> {
-        let spec = match check(argv, self.config.read_only) {
+        let spec = match check(argv, self.config.read_only, self.connector.is_cluster()) {
             Ok(spec) => spec,
             Err(err) => {
                 if let Some(transaction) = &mut self.transaction {
@@ -358,31 +390,48 @@ impl Session {
             None => request.await,
         };
         match result {
+            Ok(Value::ServerError(err)) if self.followed_failover(err.code()) => {
+                Err(reply_error(err.into()).context(
+                    "the master has moved (a failover); the console connects to the new one for the next command",
+                ))
+            }
             Ok(Value::ServerError(err)) => Err(reply_error(err.into())),
             Ok(value) => Ok(value),
             Err(err) => {
                 if err.is_io_error() || err.is_connection_dropped() || err.is_unrecoverable_error()
                 {
                     self.disconnect();
+                    // The server or the network closed it (a restart, a
+                    // failover, an idle timeout); say what happens next.
+                    return Err(reply_error(err).context(
+                        "the connection was lost, so the command may not have run; the console reconnects for the next command",
+                    ));
                 }
                 Err(reply_error(err))
             }
         }
     }
 
-    async fn connection(&mut self) -> Result<MultiplexedConnection> {
+    /// Behind Sentinel, an answer that says the server is no longer the
+    /// master drops the connection, so the next command finds the new one.
+    fn followed_failover(&mut self, code: &str) -> bool {
+        let moved = matches!(self.connector, Connector::Sentinel(_))
+            && matches!(code, "READONLY" | "MASTERDOWN");
+        if moved {
+            self.disconnect();
+        }
+        moved
+    }
+
+    async fn connection(&mut self) -> Result<OwnConn> {
         if let Some(con) = &self.con {
             return Ok(con.clone());
         }
-        let settings = AsyncConnectionConfig::new()
-            .set_connection_timeout(Some(CONNECT_TIMEOUT))
-            // `send` applies its own, per-command timeout.
-            .set_response_timeout(None);
+        // `send` applies its own, per-command timeout.
         let mut con = self
-            .redis
-            .get_multiplexed_async_connection_with_config(&settings)
-            .await
-            .map_err(|err| connect_error(err, &self.config))?;
+            .connector
+            .connect(&self.config, CONNECT_TIMEOUT)
+            .await?;
         // A new connection starts on the configured database; go back to the
         // one the console had selected.
         let configured = i64::from(self.config.db);
@@ -473,7 +522,7 @@ mod tests {
 
     /// `Ok(name)` with the table name, or `Err(message)`.
     fn gate(line: &str, read_only: bool) -> Result<&'static str, String> {
-        check(&argv(line), read_only)
+        check(&argv(line), read_only, false)
             .map(|spec| spec.map_or("?", |s| s.name))
             .map_err(|err| err.to_string())
     }
@@ -559,46 +608,46 @@ mod tests {
 
     #[test]
     fn read_only_refusals_are_typed_and_name_the_command() {
-        let err = check(&argv("config set maxmemory 1"), true).unwrap_err();
+        let err = check(&argv("config set maxmemory 1"), true, false).unwrap_err();
         let read_only = err.downcast_ref::<ReadOnlyError>().unwrap();
         assert_eq!(read_only.command(), Some("CONFIG SET"));
         assert_eq!(
             err.to_string(),
             "CONFIG SET is an administrative command, and this connection is read-only"
         );
-        let err = check(&argv("set k v"), true).unwrap_err();
+        let err = check(&argv("set k v"), true, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "SET can modify data, and this connection is read-only"
         );
-        let err = check(&argv("config bogus x"), true).unwrap_err();
+        let err = check(&argv("config bogus x"), true, false).unwrap_err();
         assert_eq!(
             err.downcast_ref::<ReadOnlyError>().unwrap().command(),
             Some("CONFIG BOGUS")
         );
-        let err = check(&argv("frobnicate x"), true).unwrap_err();
+        let err = check(&argv("frobnicate x"), true, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "FROBNICATE is not a command known to be safe, and this connection is read-only"
         );
-        let err = check(&argv("eval_ro x 0"), true).unwrap_err();
+        let err = check(&argv("eval_ro x 0"), true, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "EVAL_RO runs a script, which can still run administrative commands, and this connection is read-only"
         );
         // Arguments that are not UTF-8 are fine; names are looked up as text.
         assert_eq!(
-            check(&[b"GET".to_vec(), b"\xff\x00".to_vec()], true)
+            check(&[b"GET".to_vec(), b"\xff\x00".to_vec()], true, false)
                 .unwrap()
                 .map(|s| s.name),
             Some("GET")
         );
-        let err = check(&[b"SET".to_vec(), b"\xff".to_vec()], true).unwrap_err();
+        let err = check(&[b"SET".to_vec(), b"\xff".to_vec()], true, false).unwrap_err();
         assert_eq!(
             err.downcast_ref::<ReadOnlyError>().unwrap().command(),
             Some("SET")
         );
-        let err = check(&[b"\xffBAD".to_vec()], true).unwrap_err();
+        let err = check(&[b"\xffBAD".to_vec()], true, false).unwrap_err();
         assert_eq!(
             err.downcast_ref::<ReadOnlyError>().unwrap().command(),
             Some("\u{fffd}BAD")
@@ -623,7 +672,7 @@ mod tests {
             "SCRIPT DEBUG YES",
         ] {
             for read_only in [false, true] {
-                let err = check(&argv(line), read_only).unwrap_err();
+                let err = check(&argv(line), read_only, false).unwrap_err();
                 assert!(
                     err.downcast_ref::<ReadOnlyError>().is_none(),
                     "{line}: {err}"
@@ -638,6 +687,40 @@ mod tests {
         assert!(gate("CLIENT REPLY ON", false).is_err());
         assert!(gate("CLIENT INFO", false).is_ok());
         assert!(gate("", false).unwrap_err().contains("empty command"));
+    }
+
+    #[test]
+    fn clusters_refuse_select_and_transactions() {
+        for line in [
+            "SELECT 1",
+            "multi",
+            "EXEC",
+            "DISCARD",
+            "WATCH k",
+            "UNWATCH",
+            "SCAN 0",
+            "scan 0 MATCH user:*",
+        ] {
+            for read_only in [false, true] {
+                let err = check(&argv(line), read_only, true).unwrap_err().to_string();
+                assert!(
+                    err.contains("is not available in the console of a cluster: "),
+                    "{line}: {err}"
+                );
+            }
+        }
+        let err = check(&argv("SELECT 1"), false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.ends_with("a cluster has only database 0"), "{err}");
+        let err = check(&argv("SCAN 0"), true, true).unwrap_err().to_string();
+        assert!(err.contains("the key browser scans every primary"), "{err}");
+        // On one server SCAN is a plain read.
+        assert!(check(&argv("SCAN 0"), true, false).is_ok());
+        // Everything else is up to the read-only gate, as on one server.
+        assert!(check(&argv("GET k"), true, true).is_ok());
+        assert!(check(&argv("SET k v"), false, true).is_ok());
+        assert!(check(&argv("SET k v"), true, true).is_err());
     }
 
     #[test]
@@ -658,7 +741,7 @@ mod tests {
             ..ConnectionConfig::default()
         };
         let redis = config.client().unwrap();
-        ConsoleSession::new(Arc::new(redis), Arc::new(config))
+        ConsoleSession::new(Connector::direct(redis), Arc::new(config))
     }
 
     #[test]
@@ -722,7 +805,7 @@ mod tests {
         };
         let redis = config.client().unwrap();
         (
-            ConsoleSession::new(Arc::new(redis), Arc::new(config)),
+            ConsoleSession::new(Connector::direct(redis), Arc::new(config)),
             listener,
         )
     }
@@ -752,7 +835,7 @@ mod tests {
     fn a_cancelled_command_inside_multi_aborts_the_transaction() {
         let session = offline_session(false);
         let mut runner = Session {
-            redis: Arc::new(ConnectionConfig::default().client().unwrap()),
+            connector: Connector::direct(ConnectionConfig::default().client().unwrap()),
             config: Arc::new(ConnectionConfig::default()),
             shared: session.shared.clone(),
             con: None,

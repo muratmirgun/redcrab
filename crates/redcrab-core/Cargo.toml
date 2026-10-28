@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 futures.workspace = true
 redis.workspace = true
 serde.workspace = true
@@ -18,10 +18,17 @@ foldhash = "0.2"
 dirs = "6"
 keyring-core = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# SSH tunnels. `ring` like rustls, so there is one crypto backend to build.
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+# Hashed known_hosts entries: base64 salts and HMAC-SHA1.
+data-encoding = "2"
+ring = "0.17"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread"] }
+# A TLS server of the tests' own (the one redis-rs already uses).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }

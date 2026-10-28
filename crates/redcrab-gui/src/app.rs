@@ -71,10 +71,7 @@ impl RedcrabApp {
             |this, workspace, event, window, cx| match event {
                 WorkspaceEvent::Disconnect => {
                     // The form never shows a saved password again.
-                    let config = ConnectionConfig {
-                        password: None,
-                        ..workspace.read(cx).client().config().clone()
-                    };
+                    let config = workspace.read(cx).client().config().without_secrets();
                     this.show_connect(config, window, cx);
                 }
             },
@@ -113,8 +110,14 @@ impl Render for RedcrabApp {
         let connection = match &self.screen {
             Screen::Workspace(workspace) => {
                 let config = workspace.read(cx).client().config();
+                // A cluster has no databases to name.
+                let db = if config.topology.supports_databases() {
+                    format!(" · db{}", config.db)
+                } else {
+                    String::new()
+                };
                 Some(Connection {
-                    label: format!("{} · {} · db{}", config.name, config.address(), config.db),
+                    label: format!("{} · {}{db}", config.name, config.endpoint()),
                     tls: config.tls.is_some(),
                     environment: config.environment,
                     read_only: config.read_only,

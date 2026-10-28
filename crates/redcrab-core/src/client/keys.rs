@@ -5,9 +5,12 @@ use std::{
 
 use anyhow::{Result, bail};
 use futures::{SinkExt as _, StreamExt as _, channel::mpsc};
-use redis::{RedisError, ServerError, Value, cmd, pipe};
+use redis::{RedisError, ServerError, Value, cmd};
 
-use super::{Client, Key, ScanEvent, ScanOptions};
+use super::{
+    Client, Key, ScanEvent, ScanOptions,
+    cluster::{key_slot, unowned_error},
+};
 use crate::{
     runtime::{runtime, spawn},
     tree::KeyTree,
@@ -27,7 +30,9 @@ impl Client {
 
     /// The SCAN loop behind [`Self::scan`] and [`Self::scan_into`]. Each
     /// reply's keys go through `map` on the I/O thread; after `limit` keys
-    /// the last batch is cut and the loop ends.
+    /// the last batch is cut and the loop ends. On a cluster whose slots
+    /// are not all served by a primary it knows, the walk ends with an
+    /// error after the keys it found, since it cannot be complete.
     fn scan_batches<T: Send + 'static>(
         &self,
         options: ScanOptions,
@@ -35,8 +40,9 @@ impl Client {
         map: fn(Vec<Vec<u8>>) -> T,
     ) -> mpsc::Receiver<Result<T>> {
         let (mut tx, rx) = mpsc::channel(8);
-        let nodes = self.conn.scan_nodes();
+        let conn = self.conn.clone();
         runtime().spawn(async move {
+            let (nodes, unowned) = conn.walk_nodes().await;
             let mut left = limit.unwrap_or(usize::MAX);
             for mut con in nodes {
                 let mut cursor = 0u64;
@@ -68,6 +74,9 @@ impl Client {
                         }
                     }
                 }
+            }
+            if left > 0 && unowned > 0 {
+                let _ = tx.send(Err(unowned_error(unowned))).await;
             }
         });
         rx
@@ -137,9 +146,10 @@ impl Client {
         rx
     }
 
-    /// Type and TTL for each key, in one pipelined round trip. Fails if the
-    /// user may not see one of the keys; see [`Self::key_meta_permitted`]
-    /// for a batch that may hold such keys.
+    /// Type and TTL for each key, in one pipelined round trip (on a cluster,
+    /// one per primary, all at once). Fails if the user may not see one of
+    /// the keys; see [`Self::key_meta_permitted`] for a batch that may hold
+    /// such keys.
     pub fn key_meta(
         &self,
         keys: Vec<Key>,
@@ -181,18 +191,14 @@ impl Client {
         &self,
         keys: Vec<Key>,
     ) -> impl Future<Output = Result<Vec<Result<KeyMeta, ServerError>>>> + Send + 'static {
-        let mut con = self.conn.clone();
+        let con = self.conn.clone();
         spawn(async move {
-            if keys.is_empty() {
-                // An empty pipeline is an error to redis-rs.
-                return Ok(Vec::new());
-            }
-            let mut p = pipe();
-            for key in &keys {
-                p.cmd("TYPE").arg(&**key).cmd("PTTL").arg(&**key);
-            }
-            // Errors come back per command, in place of its reply.
-            let replies: Vec<Value> = p.ignore_errors().query_async(&mut con).await?;
+            let slices: Vec<&[u8]> = keys.iter().map(|key| &**key).collect();
+            let replies = con
+                .per_key(&slices, 2, &|p, key| {
+                    p.cmd("TYPE").arg(key).cmd("PTTL").arg(key);
+                })
+                .await?;
             anyhow::ensure!(
                 replies.len() == keys.len() * 2,
                 "the server sent {} replies for {} keys",
@@ -235,7 +241,9 @@ impl Client {
     }
 
     /// Deletes keys with UNLINK so large values are freed off the main thread
-    /// of the server.
+    /// of the server. Returns how many existed. On a cluster each key gets
+    /// an UNLINK of its own (keys in different slots cannot share one), sent
+    /// as one pipeline per primary.
     pub fn delete(&self, keys: Vec<Key>) -> impl Future<Output = Result<u64>> + Send + 'static {
         let writable = self.ensure_writable();
         let mut con = self.conn.clone();
@@ -243,6 +251,22 @@ impl Client {
             writable?;
             if keys.is_empty() {
                 return Ok(0);
+            }
+            if con.is_cluster() {
+                let slices: Vec<&[u8]> = keys.iter().map(|key| &**key).collect();
+                let replies = con
+                    .per_key(&slices, 1, &|p, key| {
+                        p.cmd("UNLINK").arg(key);
+                    })
+                    .await?;
+                let mut deleted = 0;
+                for reply in replies {
+                    match reply {
+                        Value::ServerError(err) => return Err(RedisError::from(err).into()),
+                        reply => deleted += u64::try_from(as_i64(&reply)).unwrap_or(0),
+                    }
+                }
+                return Ok(deleted);
             }
             let mut unlink = cmd("UNLINK");
             for key in &keys {
@@ -276,17 +300,27 @@ impl Client {
         })
     }
 
-    /// Renames without overwriting an existing key.
+    /// Renames without overwriting an existing key. On a cluster both names
+    /// must hash to the same slot (a hash tag such as `{user:42}` in both
+    /// does that), since a key cannot move between nodes by renaming.
     pub fn rename(&self, from: Key, to: Key) -> impl Future<Output = Result<()>> + Send + 'static {
         let writable = self.ensure_writable();
         let mut con = self.conn.clone();
         spawn(async move {
             writable?;
-            let renamed: bool = cmd("RENAMENX")
+            let cluster = con.is_cluster();
+            if cluster && key_slot(&from) != key_slot(&to) {
+                bail!("{}", cross_slot(&from, &to));
+            }
+            let renamed: bool = match cmd("RENAMENX")
                 .arg(&*from)
                 .arg(&*to)
                 .query_async(&mut con)
-                .await?;
+                .await
+            {
+                Err(err) if err.code() == Some("CROSSSLOT") => bail!("{}", cross_slot(&from, &to)),
+                renamed => renamed?,
+            };
             if !renamed {
                 bail!(
                     "a key named {} already exists",
@@ -296,4 +330,15 @@ impl Client {
             Ok(())
         })
     }
+}
+
+/// Why `from` cannot be renamed to `to` on a cluster.
+fn cross_slot(from: &[u8], to: &[u8]) -> String {
+    format!(
+        "in a cluster a key can only be renamed to a name in the same hash slot, and {} (slot {}) and {} (slot {}) are not; give both names the same hash tag, e.g. {{user:42}}:a and {{user:42}}:b",
+        crate::format::bytes_inline(from),
+        key_slot(from),
+        crate::format::bytes_inline(to),
+        key_slot(to)
+    )
 }

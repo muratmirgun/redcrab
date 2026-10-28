@@ -1,8 +1,18 @@
-use std::path::{Path, PathBuf};
+mod connectivity;
+
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context as _, Result, bail};
 use redis::{ConnectionAddr, IntoConnectionInfo, RedisConnectionInfo};
 use serde::{Deserialize, Serialize};
+
+pub use self::connectivity::{
+    ConfigField, HostKeyPolicy, InvalidConfig, SshAuth, SshConfig, Topology, UNIX_SOCKETS,
+    format_address, parse_address, split_addresses,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -26,6 +36,19 @@ pub struct ConnectionConfig {
     pub read_only: bool,
     /// Tags the connection so a production server is hard to mistake.
     pub environment: Environment,
+    /// One server, a cluster, or a master found through Sentinel.
+    pub topology: Topology,
+    /// Connect to this local socket instead of `host`/`port` (standalone
+    /// servers only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unix_socket: Option<PathBuf>,
+    /// Reach `host`/`port` through this SSH server (standalone servers only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshConfig>,
+    /// The password for the sentinels of a [`Topology::Sentinel`]
+    /// connection. Never written to disk; it lives in the credential store.
+    #[serde(skip)]
+    pub sentinel_password: Option<String>,
 }
 
 /// What a server is used for, shown as a colored tag. Stored in lower case
@@ -99,7 +122,7 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    fn certificates(&self) -> Result<Option<redis::TlsCertificates>> {
+    pub(crate) fn certificates(&self) -> Result<Option<redis::TlsCertificates>> {
         let read = |path: &Path, what: &str| {
             std::fs::read(path)
                 .with_context(|| format!("could not read the {what} {}", path.display()))
@@ -139,6 +162,10 @@ impl Default for ConnectionConfig {
             tls: None,
             read_only: false,
             environment: Environment::None,
+            topology: Topology::Standalone,
+            unix_socket: None,
+            ssh: None,
+            sentinel_password: None,
         }
     }
 }
@@ -211,7 +238,9 @@ impl ConnectionConfig {
     /// read-only connection stays read-only, its environment tag stays, and
     /// TLS stays on even when the URL leaves out `rediss://`, since sending
     /// the saved password in clear text would be worse than failing to
-    /// connect.
+    /// connect. A URL cannot express a topology, a Unix socket or an SSH
+    /// tunnel, so those come from the saved connection too: a URL never
+    /// skips the tunnel the server is reached through.
     pub fn with_saved(self, saved: &[ConnectionConfig]) -> ConnectionConfig {
         let Some(saved) = saved.iter().find(|c| c.name == self.name) else {
             return self;
@@ -243,6 +272,10 @@ impl ConnectionConfig {
                 Environment::None => saved.environment,
                 tagged => tagged,
             },
+            topology: saved.topology.clone(),
+            unix_socket: saved.unix_socket.clone(),
+            ssh: saved.ssh.clone(),
+            sentinel_password: None,
         }
     }
 
@@ -259,8 +292,9 @@ impl ConnectionConfig {
         }
     }
 
-    /// Builds the redis-rs client, reading any TLS certificate files.
-    pub(crate) fn client(&self) -> Result<redis::Client> {
+    /// The per-connection settings every server of this connection gets:
+    /// database, user, password and the library name shown in CLIENT LIST.
+    pub(crate) fn redis_settings(&self) -> RedisConnectionInfo {
         let mut redis = RedisConnectionInfo::default()
             .set_db(self.db.into())
             .set_lib_name("redcrab", env!("CARGO_PKG_VERSION"));
@@ -270,30 +304,77 @@ impl ConnectionConfig {
         if let Some(password) = self.password.as_deref().filter(|p| !p.is_empty()) {
             redis = redis.set_password(password);
         }
-        let addr = match &self.tls {
-            None => ConnectionAddr::Tcp(self.host.clone(), self.port),
-            Some(tls) => {
-                install_crypto_provider();
-                ConnectionAddr::TcpTls {
-                    host: self.host.clone(),
-                    port: self.port,
-                    insecure: tls.insecure,
-                    tls_params: None,
-                }
+        redis
+    }
+
+    /// Builds the redis-rs client for the configured server: the Unix
+    /// socket, or `host`/`port`. Reads any TLS certificate files.
+    pub(crate) fn client(&self) -> Result<redis::Client> {
+        match &self.unix_socket {
+            Some(path) => self.client_for(Target::Unix(path)),
+            None => self.client_for(Target::Tcp(&self.host, self.port)),
+        }
+    }
+
+    /// Builds the redis-rs client for one server of this connection, with
+    /// its credentials and TLS settings. Reads any TLS certificate files.
+    pub(crate) fn client_for(&self, target: Target<'_>) -> Result<redis::Client> {
+        let (host, port, tunneled) = match target {
+            Target::Unix(path) => {
+                let info = ConnectionAddr::Unix(path.to_path_buf())
+                    .into_connection_info()?
+                    .set_redis_settings(self.redis_settings());
+                return Ok(redis::Client::open(info)?);
             }
+            Target::Tcp(host, port) => (host.to_string(), port, false),
+            Target::Tunnel(local) => (local.ip().to_string(), local.port(), true),
         };
-        let info = addr.into_connection_info()?.set_redis_settings(redis);
-        let certificates = self
-            .tls
-            .as_ref()
-            .map(TlsConfig::certificates)
-            .transpose()?
-            .flatten();
-        Ok(match certificates {
+        let Some(tls) = &self.tls else {
+            let info = ConnectionAddr::Tcp(host, port)
+                .into_connection_info()?
+                .set_redis_settings(self.redis_settings());
+            return Ok(redis::Client::open(info)?);
+        };
+        install_crypto_provider();
+        let info = ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure: tls.insecure,
+            tls_params: None,
+        }
+        .into_connection_info()?
+        .set_redis_settings(self.redis_settings());
+        let client = match tls.certificates()? {
             Some(certificates) => redis::Client::build_with_tls(info, certificates)?,
             None => redis::Client::open(info)?,
-        })
+        };
+        if !tunneled {
+            return Ok(client);
+        }
+        // Through an SSH tunnel the client connects to 127.0.0.1 while the
+        // certificate names the Redis host, and redis-rs checks the name
+        // against the address it connects to (it has no way to connect to
+        // one address and check another name). So only here the name check
+        // is skipped; the chain is still verified, against the CA file,
+        // which `validate` requires through a tunnel: with the system's
+        // roots any public certificate would pass, and the SSH host key
+        // only vouches for the bastion, not for its hop to Redis. See "SSH
+        // tunnels" in the README.
+        let info = client.get_connection_info().clone();
+        let mut addr = info.addr().clone();
+        addr.set_danger_accept_invalid_hostnames(true);
+        Ok(redis::Client::open(info.set_addr(addr))?)
     }
+}
+
+/// The server a redis-rs client is built for (see
+/// [`ConnectionConfig::client_for`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Target<'a> {
+    Tcp(&'a str, u16),
+    Unix(&'a Path),
+    /// The local end of an SSH tunnel to the configured host and port.
+    Tunnel(SocketAddr),
 }
 
 /// rustls needs a process-wide crypto provider when the dependency graph does
@@ -304,7 +385,173 @@ fn install_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+
     use super::*;
+
+    /// `tests/fixtures/tls-name`: a CA, and a server certificate it signed
+    /// that names only `redis.internal`, valid until 2126.
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls-name")
+            .join(name)
+    }
+
+    fn with_ca() -> ConnectionConfig {
+        ConnectionConfig {
+            host: "redis.internal".into(),
+            tls: Some(TlsConfig {
+                ca_file: Some(fixture("ca.crt")),
+                ..TlsConfig::default()
+            }),
+            ..ConnectionConfig::default()
+        }
+    }
+
+    /// Whether the client built for `target` skips the certificate's name.
+    fn skips_name_check(config: &ConnectionConfig, target: Target<'_>) -> bool {
+        let client = config.client_for(target).unwrap();
+        format!("{:?}", client.get_connection_info().addr())
+            .contains("danger_accept_invalid_hostnames: true")
+    }
+
+    #[test]
+    fn the_name_check_is_skipped_only_through_a_tunnel() {
+        let tunnel = || Target::Tunnel("127.0.0.1:6379".parse().unwrap());
+        let direct = || Target::Tcp("redis.internal", 6379);
+        let system_roots = ConnectionConfig {
+            tls: Some(TlsConfig::default()),
+            ..with_ca()
+        };
+        for config in [with_ca(), system_roots] {
+            assert!(skips_name_check(&config, tunnel()));
+            assert!(!skips_name_check(&config, direct()));
+        }
+        assert!(!skips_name_check(
+            &ConnectionConfig::default(),
+            Target::Tunnel("127.0.0.1:6379".parse().unwrap())
+        ));
+    }
+
+    /// A TLS server of the test's own presenting the fixture certificate
+    /// (for `redis.internal` only), answering every command the way Redis
+    /// answers PING or CLIENT SETINFO: enough for a client to connect.
+    fn named_tls_server(runtime: &tokio::runtime::Runtime) -> SocketAddr {
+        install_crypto_provider();
+        let read = |name| std::fs::read(fixture(name)).unwrap();
+        let certificates = CertificateDer::pem_slice_iter(&read("server.crt"))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key = PrivateKeyDer::from_pem_slice(&read("server.key")).unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        runtime.spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(socket).await else {
+                        return;
+                    };
+                    let (read, mut write) = tokio::io::split(stream);
+                    let mut read = BufReader::new(read);
+                    let mut line = String::new();
+                    loop {
+                        // `*N`, then N times `$len` and the argument.
+                        line.clear();
+                        let Ok(n) = read.read_line(&mut line).await else {
+                            return;
+                        };
+                        let Some(count) = line.trim().strip_prefix('*') else {
+                            return;
+                        };
+                        let (Ok(count), true) = (count.parse::<usize>(), n > 0) else {
+                            return;
+                        };
+                        let mut name = Vec::new();
+                        for ix in 0..count {
+                            line.clear();
+                            let _ = read.read_line(&mut line).await;
+                            let len: usize = line.trim()[1..].parse().unwrap_or(0);
+                            let mut arg = vec![0; len + 2];
+                            if read.read_exact(&mut arg).await.is_err() {
+                                return;
+                            }
+                            if ix == 0 {
+                                name = arg[..len].to_ascii_uppercase();
+                            }
+                        }
+                        let reply: &[u8] = if name == b"PING" {
+                            b"+PONG\r\n"
+                        } else {
+                            b"+OK\r\n"
+                        };
+                        if write.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn only_a_tunneled_connection_accepts_another_name() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = named_tls_server(&runtime);
+        let ping = |client: redis::Client| {
+            runtime.block_on(async move {
+                let mut con = client.get_multiplexed_async_connection().await?;
+                redis::cmd("PING").query_async::<String>(&mut con).await
+            })
+        };
+        let config = with_ca();
+
+        // Through a tunnel the client connects to 127.0.0.1, which the
+        // certificate does not name; the chain, signed by the CA, passes.
+        let tunneled = config.client_for(Target::Tunnel(server)).unwrap();
+        assert_eq!(ping(tunneled).unwrap(), "PONG");
+        // The same server reached directly: the name is checked, and
+        // 127.0.0.1 is not it.
+        let direct = ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            ..config.clone()
+        };
+        let err = match futures::executor::block_on(crate::Client::connect(direct)) {
+            Ok(_) => panic!("the name was not checked"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            err.contains("the server's certificate is not valid for 127.0.0.1"),
+            "{err}"
+        );
+        // Through the tunnel the chain still counts: the system's roots do
+        // not know the fixture CA (and `validate` refuses this setting).
+        let system_roots = ConnectionConfig {
+            tls: Some(TlsConfig::default()),
+            ..config
+        };
+        let err = ping(system_roots.client_for(Target::Tunnel(server)).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("UnknownIssuer"), "{err}");
+        runtime.shutdown_background();
+    }
 
     #[test]
     fn parses_urls() {

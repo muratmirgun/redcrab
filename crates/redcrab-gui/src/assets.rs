@@ -16,7 +16,8 @@ gpui_kit::assets::icon_assets!(
         Unplug,
         Braces,
         Lock,
-        ShieldAlert
+        ShieldAlert,
+        Network
     ]
 );
 
