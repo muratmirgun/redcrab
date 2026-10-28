@@ -33,14 +33,14 @@ log() { printf '==> %s\n' "$*" >&2; }
 # package that never looks for updates.
 export REDCRAB_SELF_UPDATE="${REDCRAB_SELF_UPDATE-1}"
 
-# Checks that the executable $1 says exactly `redcrab <version>` to
-# --version (without opening a window): before an update replaces the
-# running copy, it asks the new one the same.
+# Checks that the executable $1 says exactly `<name> <version>` to
+# --version (without opening a window), the name being $2 or redcrab:
+# before an update replaces the running copy, it asks the new one the same.
 answers_version() {
-    local said
+    local said expected="${2:-redcrab} $VERSION"
     said=$("$1" --version)
-    if [ "$said" != "redcrab $VERSION" ]; then
-        echo "$1 says '$said' to --version, not 'redcrab $VERSION'" >&2
+    if [ "$said" != "$expected" ]; then
+        echo "$1 says '$said' to --version, not '$expected'" >&2
         exit 1
     fi
 }

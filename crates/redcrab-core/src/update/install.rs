@@ -408,10 +408,37 @@ fn install_portable(
         fs::rename(&staging.0, exe)
             .with_context(|| format!("could not replace {}", exe.display()))?;
     }
+    // The terminal app goes along when it is installed beside this one.
+    // This one is in place by now, so a failure only leaves the terminal
+    // app as it was.
+    if let Err(err) = replace_beside(folder, &unpacked.join(top), "redcrab-tui", version) {
+        tracing::warn!("redcrab-tui was not updated: {err:#}");
+    }
     Ok(Installed {
         version: version.clone(),
         exe: exe.to_owned(),
     })
+}
+
+/// Replaces `program` in `folder` with the one in `from`, if both are
+/// there, asking the new one for its version first.
+fn replace_beside(folder: &Path, from: &Path, program: &str, version: &Version) -> Result<()> {
+    let file = format!("{program}{}", std::env::consts::EXE_SUFFIX);
+    let (installed, new) = (folder.join(&file), from.join(&file));
+    if !installed.is_file() || !new.is_file() {
+        return Ok(());
+    }
+    let staging = Staging::new(folder, &format!("-{file}"));
+    fs::copy(&new, &staging.0)
+        .with_context(|| format!("could not write {}", staging.0.display()))?;
+    check_program(&staging.0, program, version)?;
+    if cfg!(windows) {
+        let old = folder.join(format!(".redcrab-old-{}-{file}", std::process::id()));
+        swap(&installed, &staging.0, &old)
+    } else {
+        fs::rename(&staging.0, &installed)
+            .with_context(|| format!("could not replace {}", installed.display()))
+    }
 }
 
 /// Unpacks a `.tar.gz` or `.zip` with the system's tar: GNU tar on Linux,
@@ -450,6 +477,11 @@ fn swap(target: &Path, new: &Path, old: &Path) -> Result<()> {
 
 /// Runs `exe --version` and checks that it is redcrab `version`.
 pub(super) fn check_version(exe: &Path, version: &Version) -> Result<()> {
+    check_program(exe, "redcrab", version)
+}
+
+/// Runs `exe --version` and checks that it is `program` `version`.
+fn check_program(exe: &Path, program: &str, version: &Version) -> Result<()> {
     let mut tries = 0;
     let mut child = loop {
         let spawned = Command::new(exe)
@@ -488,7 +520,7 @@ pub(super) fn check_version(exe: &Path, version: &Version) -> Result<()> {
     if let Some(mut stdout) = child.stdout.take() {
         let _ = stdout.read_to_string(&mut said);
     }
-    let expected = format!("redcrab {version}");
+    let expected = format!("{program} {version}");
     if !status.success() || said.trim() != expected {
         bail!(
             "the downloaded program is not {expected}: it says {:?}",

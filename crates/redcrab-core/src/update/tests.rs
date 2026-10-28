@@ -472,10 +472,16 @@ fn clean_up_removes_only_old_leftovers() {
 /// `--version` as redcrab does.
 #[cfg(unix)]
 fn fake_redcrab(path: &Path, v: &str) {
+    fake_program(path, "redcrab", v);
+}
+
+/// A stand-in for `program`, answering `--version` with `program v`.
+#[cfg(unix)]
+fn fake_program(path: &Path, program: &str, v: &str) {
     use std::os::unix::fs::PermissionsExt as _;
 
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, format!("#!/bin/sh\necho 'redcrab {v}'\n")).unwrap();
+    fs::write(path, format!("#!/bin/sh\necho '{program} {v}'\n")).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -488,12 +494,23 @@ fn say_version(exe: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
-/// The Linux tarball of `v`, with a fake redcrab saying `says`.
+/// The Linux tarball of `v`, with a fake redcrab saying `says`, and a
+/// redcrab-tui saying `tui_says` if given.
 #[cfg(target_os = "linux")]
 fn tarball(temp: &Temp, v: &str, says: &str) -> (String, Vec<u8>) {
+    tarball_with(temp, v, says, None)
+}
+
+#[cfg(target_os = "linux")]
+fn tarball_with(temp: &Temp, v: &str, says: &str, tui_says: Option<&str>) -> (String, Vec<u8>) {
     let top = format!("redcrab-{v}-linux-{}", std::env::consts::ARCH);
-    let src = temp.0.join(format!("src-{says}"));
+    let src = temp
+        .0
+        .join(format!("src-{says}-{}", tui_says.unwrap_or("none")));
     fake_redcrab(&src.join(&top).join("redcrab"), says);
+    if let Some(tui_says) = tui_says {
+        fake_program(&src.join(&top).join("redcrab-tui"), "redcrab-tui", tui_says);
+    }
     let name = format!("{top}.tar.gz");
     let out = temp.0.join(&name);
     let status = std::process::Command::new("tar")
@@ -532,6 +549,44 @@ fn a_tarball_install_updates_in_place() {
         .map(|e| e.file_name())
         .collect();
     assert_eq!(left, ["redcrab"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_terminal_app_beside_it_goes_along() {
+    let temp = Temp::new("portable-tui");
+    let server = Server::start();
+    let key = test_key();
+    let exe = temp.0.join("app/redcrab");
+    let tui = temp.0.join("app/redcrab-tui");
+    fake_redcrab(&exe, "0.1.0");
+    fake_program(&tui, "redcrab-tui", "0.1.0");
+    let install = Install::Portable { exe: exe.clone() };
+
+    let (name, package) = tarball_with(&temp, "9.0.0", "9.0.0", Some("9.0.0"));
+    let release = publish(&server, "9.0.0", &name, &package, &key);
+    run_update(&release, &install, &public(&key))
+        .unwrap()
+        .unwrap();
+    assert_eq!(say_version(&exe), "redcrab 9.0.0");
+    assert_eq!(say_version(&tui), "redcrab-tui 9.0.0");
+
+    // A terminal app that is not the version: the desktop app still
+    // updates, the terminal app stays.
+    let (name, package) = tarball_with(&temp, "9.1.0", "9.1.0", Some("8.0.0"));
+    let release = publish(&server, "9.1.0", &name, &package, &key);
+    run_update(&release, &install, &public(&key))
+        .unwrap()
+        .unwrap();
+    assert_eq!(say_version(&exe), "redcrab 9.1.0");
+    assert_eq!(say_version(&tui), "redcrab-tui 9.0.0");
+    let mut left: Vec<_> = fs::read_dir(exe.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["redcrab", "redcrab-tui"]);
 }
 
 #[cfg(target_os = "linux")]

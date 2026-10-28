@@ -20,6 +20,11 @@ Download a package from [Releases](https://github.com/muratmirgun/redcrab/releas
 | Other Linux with glibc 2.35+ | `redcrab-<version>-linux-<arch>.tar.gz`: run `./redcrab`; copy its `share/` into `~/.local/share` for a menu entry |
 | Windows 10 and 11, x86_64 | `redcrab-<version>-windows-x86_64.zip` |
 
+The Linux and Windows packages hold the [terminal app](#terminal-app), `redcrab-tui`,
+too. On macOS it comes on its own, as `redcrab-tui-<version>-macos-universal.tar.gz`:
+put `redcrab-tui` in a folder on your `PATH` (if macOS refuses to run a downloaded copy,
+`xattr -d com.apple.quarantine redcrab-tui`).
+
 `SHA256SUMS` lists every file's checksum (`sha256sum -c SHA256SUMS`).
 
 - **macOS:** the app is not notarized yet, so the first start needs a right-click on

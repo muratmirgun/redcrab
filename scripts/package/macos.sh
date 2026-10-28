@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds redcrab.app and wraps it in a disk image:
+# Builds redcrab.app and wraps it in a disk image, and packs the terminal
+# app on its own:
 #   dist/redcrab-<version>-macos-<arch>.dmg
+#   dist/redcrab-tui-<version>-macos-<arch>.tar.gz
 #
 #   scripts/package/macos.sh                       # this Mac's architecture
 #   TARGETS="aarch64-apple-darwin x86_64-apple-darwin" scripts/package/macos.sh
@@ -33,10 +35,13 @@ if xcrun -sdk macosx metal --version >/dev/null 2>&1 &&
 fi
 
 binaries=()
+tui_binaries=()
 for target in "${targets[@]}"; do
     log "building $target"
-    cargo build -p redcrab-gui --release --locked --target "$target" ${features[@]+"${features[@]}"}
+    cargo build -p redcrab-gui -p redcrab-tui --release --locked --target "$target" \
+        ${features[@]+"${features[@]}"}
     binaries+=("$TARGET_DIR/$target/release/redcrab")
+    tui_binaries+=("$TARGET_DIR/$target/release/redcrab-tui")
 done
 
 case "${#targets[@]}:${targets[0]}" in
@@ -132,5 +137,21 @@ if [ -n "$identity" ] && [ -n "${APPLE_NOTARY_KEY:-}" ] &&
     xcrun stapler validate "$dmg"
 fi
 
-checksum "$dmg"
+# --- the terminal app: a signed binary in a tarball, for a PATH folder
+tui="redcrab-tui-$VERSION-macos-$arch"
+mkdir -p "$WORK/$tui"
+lipo -create -output "$WORK/$tui/redcrab-tui" "${tui_binaries[@]}"
+if [ -n "$identity" ]; then
+    codesign --force --options runtime --timestamp --sign "$identity" "$WORK/$tui/redcrab-tui"
+else
+    codesign --force --sign - "$WORK/$tui/redcrab-tui"
+fi
+codesign --verify --strict "$WORK/$tui/redcrab-tui"
+answers_version "$WORK/$tui/redcrab-tui" redcrab-tui
+cp LICENSE-MIT LICENSE-APACHE README.md "$WORK/$tui/"
+tarball="$DIST/$tui.tar.gz"
+tar -C "$WORK" -czf "$tarball" "$tui"
+
+checksum "$dmg" "$tarball"
 echo "$dmg"
+echo "$tarball"

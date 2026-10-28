@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Builds the Linux packages for this machine's architecture:
-#   dist/redcrab-<version>-linux-<arch>.tar.gz   binary, .desktop file, icons
+# Builds the Linux packages for this machine's architecture, each with the
+# desktop app and the terminal app (redcrab-tui):
+#   dist/redcrab-<version>-linux-<arch>.tar.gz   binaries, .desktop file, icons
 #   dist/redcrab_<version>_<debarch>.deb         for Debian and Ubuntu
 #
 # Build on the oldest distribution the packages should run on: the binary
@@ -16,9 +17,11 @@ case "$(uname -m)" in
 esac
 
 log "building"
-cargo build -p redcrab-gui --release --locked
+cargo build -p redcrab-gui -p redcrab-tui --release --locked
 binary="$TARGET_DIR/release/redcrab"
+tui="$TARGET_DIR/release/redcrab-tui"
 answers_version "$binary"
+answers_version "$tui" redcrab-tui
 
 log "rendering icons"
 icons="$WORK/icons"
@@ -48,6 +51,7 @@ name="redcrab-$VERSION-linux-$arch"
 tree="$WORK/$name"
 mkdir -p "$tree/share/applications" "$tree/share/icons"
 install -m 755 "$binary" "$tree/redcrab"
+install -m 755 "$tui" "$tree/redcrab-tui"
 install -m 644 "$desktop" "$tree/share/applications/redcrab.desktop"
 cp -R "$icons/hicolor" "$tree/share/icons/"
 install -m 644 LICENSE-MIT LICENSE-APACHE README.md "$tree/"
@@ -57,6 +61,7 @@ tar -C "$WORK" -czf "$tarball" "$name"
 # --- .deb
 root="$WORK/deb"
 install -D -m 755 "$binary" "$root/usr/bin/redcrab"
+install -D -m 755 "$tui" "$root/usr/bin/redcrab-tui"
 install -D -m 644 "$desktop" "$root/usr/share/applications/redcrab.desktop"
 mkdir -p "$root/usr/share/icons"
 cp -R "$icons/hicolor" "$root/usr/share/icons/"
@@ -85,7 +90,7 @@ find "$root" -type d -exec chmod 755 {} +
 # find fonts, and Wayland on Wayland sessions (X11 works without it).
 mkdir -p "$WORK/shlibs/debian"
 printf 'Source: redcrab\n\nPackage: redcrab\nArchitecture: any\n' >"$WORK/shlibs/debian/control"
-depends=$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$root/usr/bin/redcrab" |
+depends=$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$root/usr/bin/redcrab" "$root/usr/bin/redcrab-tui" |
     sed -n 's/^shlibs:Depends=//p')
 depends="$depends, libvulkan1, libfontconfig1"
 installed_kb=$(du -sk "$root/usr" | cut -f1)
@@ -106,7 +111,8 @@ Description: fast, native Redis GUI
  redcrab is a GPU-rendered client for Redis and Valkey that stays responsive
  on keyspaces with millions of keys. It browses keys as a tree, edits values
  of every type, and connects to standalone servers, clusters and Sentinel,
- over TLS, Unix sockets or SSH tunnels.
+ over TLS, Unix sockets or SSH tunnels. redcrab-tui does the same in a
+ terminal.
 EOF
 deb="$DIST/redcrab_${VERSION}_${deb_arch}.deb"
 dpkg-deb --root-owner-group --build "$root" "$deb" >&2

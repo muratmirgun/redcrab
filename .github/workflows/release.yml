@@ -143,6 +143,7 @@ jobs:
         run: |
           sudo apt-get install -y ./dist/redcrab_*.deb
           redcrab --version
+          redcrab-tui --version
 
       - uses: actions/upload-artifact@v7
         with:
@@ -178,6 +179,9 @@ jobs:
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP/check"
           $exe = Get-ChildItem "$env:RUNNER_TEMP/check" -Recurse -Filter redcrab.exe | Select-Object -First 1
           if (-not $exe) { throw "redcrab.exe is missing from $($zip.Name)" }
+          if (-not (Test-Path (Join-Path $exe.DirectoryName "redcrab-tui.exe"))) {
+            throw "redcrab-tui.exe is missing from $($zip.Name)"
+          }
           $info = $exe.VersionInfo
           "$($info.ProductName) $($info.ProductVersion): $($info.FileDescription)"
           if ($info.ProductName -ne "redcrab") { throw "version resource missing" }
