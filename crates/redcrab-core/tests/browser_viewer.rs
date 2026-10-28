@@ -428,10 +428,18 @@ fn the_value_view_of_every_type() {
     let columns = hash.columns();
     assert_eq!((columns.first, columns.second), (Some("Field"), "Value"));
     assert_eq!(hash.row_count(), 2);
-    assert_eq!(hash.row_cells(0), (Some("f1".into()), "v1".into()));
+    // The long value makes this a real hash table, which HSCAN walks in an
+    // order set by the server's random per-process hash seed, so either
+    // field may come first.
+    let (f1, f2) = match hash.row_cells(0).0.as_deref() {
+        Some("f1") => (0, 1),
+        _ => (1, 0),
+    };
+    assert_eq!(hash.row_cells(f1), (Some("f1".into()), "v1".into()));
+    assert_eq!(hash.row_cells(f2).0.as_deref(), Some("f2"));
     // A cell shows the start of a long value; the detail pane all of it.
-    assert_eq!(hash.row_cells(1).1.len(), CELL_PREVIEW);
-    assert_eq!(hash.row_value(1).unwrap(), long.as_bytes());
+    assert_eq!(hash.row_cells(f2).1.len(), CELL_PREVIEW);
+    assert_eq!(hash.row_value(f2).unwrap(), long.as_bytes());
     assert_eq!(hash.summary().as_deref(), Some("2 items"));
     assert_eq!(hash.footer(), "Showing 2 of 2");
     assert_eq!(hash.ttl_text(), "No expiry");

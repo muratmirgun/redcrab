@@ -12,8 +12,10 @@ path = "src/main.rs"
 [features]
 default = ["runtime-shaders"]
 # Compile Metal shaders at startup instead of build time. Needed when only the
-# Command Line Tools are installed (no `xcrun metal`). Turn off for release
-# builds made with full Xcode.
+# Command Line Tools are installed (no `xcrun metal`). gpui-kit 0.8.1 turns
+# this on in GPUI by itself, so turning the feature off changes nothing yet;
+# once it no longer does, release builds made with full Xcode can turn it off
+# to precompile the shaders.
 runtime-shaders = ["dep:gpui-pre-apple", "gpui-pre-apple/runtime_shaders"]
 
 [dependencies]

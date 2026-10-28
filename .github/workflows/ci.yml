@@ -1,0 +1,211 @@
+# Formatting, lints, unit and integration tests, and GUI builds on Linux,
+# macOS and Windows.
+#
+# Every `run:` step is plain bash that works the same on a developer machine,
+# so a failing step can be reproduced by running its commands locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per branch or pull request at a time: a new push cancels the run it
+# supersedes. On main every push gets a complete run, so each commit there has
+# a group of its own: `cancel-in-progress: false` only spares the run in
+# progress, and a group keeps at most one pending run, so with one group for
+# main a push that arrived while a run was going would be dropped by the next.
+# (`queue: max` keeps them all, but GitHub rejects it together with the
+# `cancel-in-progress: true` the other refs need.)
+# crates/redcrab-core/tests/ci_workflow.rs checks these rules.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Pinned, so that a new Rust release (with new clippy lints) cannot turn CI
+  # red on its own. Bump it deliberately, together with any fixes it needs.
+  RUST_TOOLCHAIN: "1.99"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # File and line numbers in backtraces at a fraction of the size of full
+  # debug info, which keeps target dirs, caches and links small.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  RUST_BACKTRACE: 1
+  # Nothing a CI run does may reach a real credential store entry; the config
+  # dir is moved out of the way per job (it needs the runner's temp dir).
+  REDCRAB_CREDENTIAL_SERVICE: redcrab-ci
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # What GPUI's Linux backends link against: xcb (x11rb), xkbcommon and
+      # xkbcommon-x11, fontconfig and freetype (font-kit). Wayland, EGL and
+      # Vulkan are opened with dlopen at runtime (wayland-sys `dlopen`, ash),
+      # so they need no packages to build or to run the tests.
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libfontconfig-dev \
+            libfreetype-dev
+
+      # tests/credentials.rs stores secrets through the Secret Service, which
+      # a runner does not have: the test step starts a gnome-keyring of its
+      # own (see there).
+      - name: Install a Secret Service
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Keep redcrab's config in a temp dir
+        run: echo "REDCRAB_CONFIG_DIR=$RUNNER_TEMP/redcrab-config" >>"$GITHUB_ENV"
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Start the test environment
+        id: test-env
+        run: scripts/test-env.sh up
+
+      # In a D-Bus session of the step's own, with a login keyring unlocked by
+      # a throwaway password, so the credential store test has a Secret
+      # Service to talk to (without one it fails with "no credential store
+      # available"). Only REDCRAB_CREDENTIAL_SERVICE entries are written, and
+      # the test deletes them; the keyring goes away with the runner.
+      - name: Test, with the integration tests
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            gnome-keyring-daemon --components=secrets --daemonize --unlock <<<"redcrab-ci" >/dev/null
+            cargo test --workspace --locked --no-fail-fast'
+        env:
+          REDCRAB_IT: "1"
+
+      - name: Show the test environment
+        if: failure() && steps.test-env.conclusion != 'skipped'
+        run: |
+          scripts/test-env.sh status || true
+          docker compose -p redcrab-it -f tests/docker/compose.yml logs --no-color --tail 50 || true
+
+      # The release profile's fat LTO optimizes the whole GUI as one LLVM
+      # module. On Linux (wgpu and naga included) that link needs more than
+      # 6 GiB, against under 3 GiB with thin LTO, so runners with less memory
+      # than GitHub's standard 16 GB ones fall back to thin LTO with a warning
+      # rather than getting killed halfway through.
+      - name: Build the GUI (release)
+        run: |
+          mem_mib=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+          if [ "$mem_mib" -lt 12288 ]; then
+            echo "::warning title=Thin LTO::This runner has ${mem_mib} MiB of memory, too little for the release profile's fat LTO; building with thin LTO instead."
+            export CARGO_PROFILE_RELEASE_LTO=thin
+          fi
+          cargo build -p redcrab-gui --release --locked
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      # Code behind cfg(target_os = ...) is only compiled on its own platform,
+      # and only the Linux job runs clippy, so warnings fail the build here.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Keep redcrab's config in a temp dir
+        run: echo "REDCRAB_CONFIG_DIR=$RUNNER_TEMP/redcrab-config" >>"$GITHUB_ENV"
+
+      # GitHub's macOS runners have no Docker, so the integration tests print
+      # "skipped" here; the Linux job runs them.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
+
+      # Building without the default `runtime-shaders` feature needs `xcrun
+      # metal` and `metallib`, which come with a full Xcode (on Xcode 26 and
+      # later only once its Metal toolchain component is installed) but not
+      # with the Command Line Tools. Note: gpui-kit 0.8.1 turns on GPUI's
+      # runtime_shaders itself, so for now both builds compile the shaders at
+      # startup; this keeps CI on the release configuration once it no longer
+      # does.
+      - name: Pick the Metal shader build
+        id: shaders
+        run: |
+          if xcrun -sdk macosx metal --version >/dev/null 2>&1 &&
+            xcrun -sdk macosx --find metallib >/dev/null 2>&1; then
+            echo "Xcode's Metal compiler is available: building without runtime-shaders."
+            echo "features=--no-default-features" >>"$GITHUB_OUTPUT"
+          else
+            echo "No Metal compiler on this runner: building with runtime-shaders."
+            echo "features=" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the GUI
+        env:
+          GUI_FEATURES: ${{ steps.shaders.outputs.features }}
+        run: cargo build -p redcrab-gui --locked ${GUI_FEATURES:+"$GUI_FEATURES"}
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # See the macOS job.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Keep redcrab's config in a temp dir
+        run: echo "REDCRAB_CONFIG_DIR=$RUNNER_TEMP/redcrab-config" >>"$GITHUB_ENV"
+
+      # No Docker either; the integration tests print "skipped".
+      - name: Test the core
+        run: cargo test -p redcrab-core --locked --no-fail-fast
+
+      - name: Build the GUI
+        run: cargo build -p redcrab-gui --locked

@@ -170,9 +170,18 @@ cargo run -p redcrab-gui
 `REDCRAB_CONFIG_DIR=<dir>` and `REDCRAB_CREDENTIAL_SERVICE=<name>` make a run keep its saved
 connections and passwords apart from your own, e.g. for a quick check of a development build.
 
-Without a full Xcode install (Command Line Tools only), the default `runtime-shaders`
-feature compiles Metal shaders at startup. With Xcode, build releases with
-`--no-default-features` to precompile them.
+The Metal shaders are compiled when the app starts, so on macOS the Command Line Tools
+are enough to build it (no `xcrun metal`). GPUI Kit 0.8.1 turns that on in GPUI by
+itself, so for now building with `--no-default-features` (dropping the default
+`runtime-shaders` feature) changes nothing; once it no longer does, a full Xcode
+install can precompile them that way.
+
+On Linux the GUI links against xcb, xkbcommon, fontconfig and freetype (Wayland and
+Vulkan are loaded at runtime). On Debian and Ubuntu:
+
+```sh
+sudo apt install pkg-config libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev
+```
 
 ## Testing
 
@@ -227,5 +236,17 @@ since one of them fails the master over (and back); the others play a sentinel o
 own. `unix_socket` reaches `standalone`, `auth` and a cluster node through socket proxies
 of its own; the SSH tests keep their known_hosts files in temporary folders;
 `credentials` uses `REDCRAB_CREDENTIAL_SERVICE` (never `redcrab`; `redcrab-test` when
-unset) and deletes every entry it creates. A full run takes about 45 s, most of it in the Sentinel
-failovers and in one test that waits out a TLS handshake against a plain-TCP server.
+unset) and deletes every entry it creates. A full run takes about 45 s, most of it in the
+Sentinel failovers and in one test that waits out a TLS handshake against a plain-TCP
+server.
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to `main`, on
+pull requests and on demand. Linux checks formatting and clippy, starts the test
+environment above and runs the whole suite with `REDCRAB_IT=1` (in a D-Bus session with
+an unlocked gnome-keyring of its own, which the credential store test needs), then makes
+a release build of the GUI. macOS runs the tests (GitHub's macOS runners have no Docker, so the
+integration tests skip) and builds the GUI; Windows runs the core tests and builds the
+GUI. Every step is a plain shell command, so a failure can be reproduced locally. The
+Rust version is pinned in the workflow (`RUST_TOOLCHAIN`); bump it on purpose.
