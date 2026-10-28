@@ -231,6 +231,19 @@ estimates (marked ≈), the measured figures times the sample. A cluster is walk
 primary by primary. It only reads, so it works on a read-only connection; the user needs
 the `MEMORY` command.
 
+## Pub/Sub and MONITOR
+
+The **Pub/Sub** tab (<kbd>⌘4</kbd>) subscribes to channels, and to patterns when the name
+has `*`, `?` or `[` (PSUBSCRIBE), on a connection of its own, and lists the messages as
+they come, with their local time, newest first and filtered by channel or payload. It
+lists the channels that have subscribers (`PUBSUB CHANNELS`, one click subscribes), and
+publishes a message, which a read-only connection does not: subscribers act on what
+they receive.
+
+**Monitor** shows every command the server runs (`MONITOR`), on a cluster primary of
+your choice. It slows a busy server down, by as much as half, so it runs only when
+started and stops when you leave the tab. Both keep the newest 10,000 entries.
+
 ## Command palette and settings
 
 <kbd>⌘K</kbd> opens the command palette: everything the window can do, with its

@@ -26,7 +26,9 @@ gpui_kit::assets::icon_assets!(
         Power,
         Save,
         SunMoon,
-        MemoryStick
+        MemoryStick,
+        RadioTower,
+        X
     ]
 );
 

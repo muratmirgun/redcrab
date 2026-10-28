@@ -13,6 +13,7 @@ mod edit;
 mod keys;
 mod memory;
 mod palette;
+mod pubsub;
 mod server;
 mod settings;
 mod shortcuts;
@@ -53,6 +54,7 @@ gpui_kit::actions!(
         ShowKeys,
         ShowServer,
         ShowMemory,
+        ShowPubSub,
     ]
 );
 

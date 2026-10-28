@@ -20,7 +20,7 @@ use redcrab_core::{Client, ConnectionConfig, Environment, format, settings::Appe
 
 use crate::{
     DeleteKey, FocusSearch, NewKey, NewWindow, OpenSettings, Quit, Refresh, SaveValue, ShowKeys,
-    ShowMemory, ShowServer, ToggleConsole,
+    ShowMemory, ShowPubSub, ShowServer, ToggleConsole,
     connect::{ConnectEvent, ConnectView, Start},
     palette::{self, PaletteCommand},
     settings, style,
@@ -141,6 +141,23 @@ impl RedcrabApp {
                             Lucide::MemoryStick,
                         )
                         .keywords(&["analyze", "analysis", "big keys", "biggest", "size"]),
+                    );
+                }
+                if shown != View::PubSub {
+                    commands.push(
+                        action(
+                            "View",
+                            "Show Pub/Sub",
+                            Box::new(ShowPubSub),
+                            Lucide::RadioTower,
+                        )
+                        .keywords(&[
+                            "publish",
+                            "subscribe",
+                            "channel",
+                            "monitor",
+                            "messages",
+                        ]),
                     );
                 }
                 if shown != View::Server {

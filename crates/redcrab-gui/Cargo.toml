@@ -26,6 +26,8 @@ futures.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde_json.workspace = true
+# Local times for Pub/Sub messages and MONITOR; in GPUI's tree already.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", optional = true }

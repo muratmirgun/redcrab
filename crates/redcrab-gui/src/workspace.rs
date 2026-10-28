@@ -21,11 +21,12 @@ use gpui_kit::{
 use redcrab_core::{Client, DbInfo, Key, ServerInfo};
 
 use crate::{
-    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ShowKeys, ShowMemory, ShowServer,
-    ToggleConsole,
+    DeleteKey, FocusSearch, NewKey, Refresh, SaveValue, ShowKeys, ShowMemory, ShowPubSub,
+    ShowServer, ToggleConsole,
     console::Console,
     keys::{KeyBrowser, KeyEvent},
     memory::{MemoryEvent, MemoryView},
+    pubsub::PubSubView,
     server::ServerView,
     shortcuts,
     value::{ValueEvent, ValuePanel, ask_to_discard_edits},
@@ -47,16 +48,19 @@ pub enum View {
     Server,
     /// The memory analysis.
     Memory,
+    /// Pub/Sub and MONITOR.
+    PubSub,
 }
 
 impl View {
-    pub const ALL: [Self; 3] = [Self::Keys, Self::Server, Self::Memory];
+    pub const ALL: [Self; 4] = [Self::Keys, Self::Server, Self::Memory, Self::PubSub];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Keys => "Keys",
             Self::Server => "Server",
             Self::Memory => "Memory",
+            Self::PubSub => "Pub/Sub",
         }
     }
 }
@@ -76,6 +80,8 @@ pub struct Workspace {
     server: Option<Entity<ServerView>>,
     /// Made the first time the memory analysis is shown.
     memory: Option<Entity<MemoryView>>,
+    /// Made the first time Pub/Sub is shown.
+    pubsub: Option<Entity<PubSubView>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
@@ -150,6 +156,7 @@ impl Workspace {
             view: View::Keys,
             server: None,
             memory: None,
+            pubsub: None,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             _poll: poll,
@@ -295,6 +302,9 @@ impl Workspace {
         if let Some(memory) = &self.memory {
             memory.update(cx, |memory, cx| memory.set_client(client.clone(), cx));
         }
+        if let Some(pubsub) = &self.pubsub {
+            pubsub.update(cx, |pubsub, cx| pubsub.set_client(client.clone(), cx));
+        }
         self._poll = Self::poll(&client, cx);
         cx.emit(WorkspaceEvent::ClientChanged);
         cx.notify();
@@ -326,6 +336,13 @@ impl Workspace {
             ));
             self.memory = Some(memory);
         }
+        if view == View::PubSub && self.pubsub.is_none() {
+            let client = self.client.clone();
+            self.pubsub = Some(cx.new(|cx| PubSubView::new(client, window, cx)));
+        }
+        if let Some(pubsub) = &self.pubsub {
+            pubsub.update(cx, |pubsub, cx| pubsub.set_shown(view == View::PubSub, cx));
+        }
         if let Some(server) = &self.server {
             server.update(cx, |server, cx| server.set_shown(view == View::Server, cx));
         }
@@ -346,6 +363,10 @@ impl Workspace {
 
     fn show_memory(&mut self, _: &ShowMemory, window: &mut Window, cx: &mut Context<Self>) {
         self.show(View::Memory, window, cx);
+    }
+
+    fn show_pubsub(&mut self, _: &ShowPubSub, window: &mut Window, cx: &mut Context<Self>) {
+        self.show(View::PubSub, window, cx);
     }
 
     /// Shows `key` in the keys view: selected in the tree (added to it if
@@ -489,12 +510,15 @@ impl Render for Workspace {
                 div().size_full().child(above).into_any_element()
             }
         };
-        let main = match (self.view, &self.server, &self.memory) {
-            (View::Server, Some(server), _) => {
+        let main = match (self.view, &self.server, &self.memory, &self.pubsub) {
+            (View::Server, Some(server), _, _) => {
                 with_console("server-console", server.clone().into_any_element())
             }
-            (View::Memory, _, Some(memory)) => {
+            (View::Memory, _, Some(memory), _) => {
                 with_console("memory-console", memory.clone().into_any_element())
+            }
+            (View::PubSub, _, _, Some(pubsub)) => {
+                with_console("pubsub-console", pubsub.clone().into_any_element())
             }
             _ => h_resizable("workspace")
                 .child(
@@ -530,6 +554,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_keys))
             .on_action(cx.listener(Self::show_server))
             .on_action(cx.listener(Self::show_memory))
+            .on_action(cx.listener(Self::show_pubsub))
             .child(
                 TabBar::new("views")
                     .underline()
@@ -545,6 +570,7 @@ impl Render for Workspace {
                                 View::Keys => gpui_kit::assets::IconName::Key,
                                 View::Server => gpui_kit::assets::IconName::Server,
                                 View::Memory => gpui_kit::assets::IconName::MemoryStick,
+                                View::PubSub => gpui_kit::assets::IconName::RadioTower,
                             })
                             .aria_label(format!(
                                 "{} ({})",
