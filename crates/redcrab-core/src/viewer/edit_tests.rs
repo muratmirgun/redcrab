@@ -1213,3 +1213,49 @@ fn removing_the_last_elements_deletes_the_key() {
     };
     assert_eq!(value.apply(&delete, &gone), Applied::KeyGone);
 }
+
+/// A front end decodes and encodes big values away from its UI thread:
+/// the pieces it moves there are `Send`, and do what the one-step calls
+/// do.
+#[test]
+fn decoding_and_encoding_can_move_off_the_ui_thread() {
+    fn send<T: Send + 'static>(_: &T) {}
+
+    let value = hash(&[("a", "{\"x\":1}"), ("b", "2")]);
+    let source = value.row_source(0, true).unwrap();
+    send(&source);
+    assert_eq!(source.len(), 7);
+    let edit = source.into_edit();
+    send(&edit);
+    let direct = value.row_edit(0, true).unwrap();
+    assert_eq!(
+        (edit.row(), edit.value().text(), edit.value().format()),
+        (direct.row(), direct.value().text(), direct.value().format())
+    );
+    assert_eq!(
+        format!("{:?}", edit.save(&value.key, "{\"x\":2}", None).unwrap()),
+        format!("{:?}", value.save_row(&direct, "{\"x\":2}", None).unwrap())
+    );
+    assert!(value.row_source(9, true).is_none());
+
+    let string = loaded(
+        KeyType::String,
+        ValueData::String(br#"{"a":[1,2]}"#.to_vec()),
+        11,
+        None,
+    );
+    let source = string.text_source(true).unwrap();
+    send(&source);
+    let edit = source.into_edit();
+    assert_eq!(edit.text(), string.text_edit(true).unwrap().text());
+    let target = string.text_target();
+    send(&target);
+    let typed = edit.text().replace('2', "3");
+    assert_eq!(
+        format!("{:?}", target.save(&edit, &typed).unwrap()),
+        format!("{:?}", string.save_text(&edit, &typed).unwrap())
+    );
+    assert_eq!(target.save(&edit, edit.text()).unwrap(), None);
+    assert_eq!(string.load_id(), string.clone().load_id());
+    assert_ne!(string.load_id(), hash(&[]).load_id());
+}

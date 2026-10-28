@@ -19,7 +19,7 @@ use anyhow::{Context as _, Result};
 
 pub use self::{
     edit::{
-        AddRow, Applied, Mutation, NameField, NewKeyType, Outcome, RowEdit, change_ttl,
+        AddRow, Applied, Mutation, NameField, NewKeyType, Outcome, RowEdit, RowSource, change_ttl,
         format_score, new_key, parse_score, parse_stream_fields, parse_ttl, rename_key, set_ttl,
         ttl_input, ttl_prefill,
     },
@@ -85,6 +85,53 @@ pub fn load(client: &Client, key: Key) -> impl Future<Output = Result<Loaded>> +
         // cannot be followed on either.
         loaded.epoch = (client.epoch() == epoch).then_some(epoch);
         Ok(loaded)
+    }
+}
+
+/// A string or JSON value copied out of a [`Loaded`] value, to make its
+/// [`TextEdit`] from ([`Loaded::text_source`]).
+#[derive(Clone, Debug)]
+pub enum TextSource {
+    String { bytes: Vec<u8>, editable: bool },
+    Json { json: String, writable: bool },
+}
+
+impl TextSource {
+    /// Detects the format and decodes the text (inflating gzip, turning
+    /// MessagePack into JSON, pretty-printing JSON): what takes a while
+    /// for a big value.
+    pub fn into_edit(self) -> TextEdit {
+        match self {
+            Self::String { bytes, editable } => TextEdit::new(bytes, editable),
+            Self::Json { json, writable } => TextEdit::json_document(json, writable),
+        }
+    }
+}
+
+/// The key and kind a string or JSON value's text is saved to
+/// ([`Loaded::text_target`]).
+#[derive(Clone, Debug)]
+pub struct TextTarget {
+    key: Key,
+    json: bool,
+}
+
+impl TextTarget {
+    /// [`Loaded::save_text`]: encoding `edited` back into the value's
+    /// format (gzip, MessagePack, ...) takes a while for a big value.
+    pub fn save(&self, edit: &TextEdit, edited: &str) -> Result<Option<Mutation>> {
+        let Some(bytes) = edit.to_save(edited)? else {
+            return Ok(None);
+        };
+        let key = self.key.clone();
+        Ok(Some(if self.json {
+            Mutation::SetJson {
+                key,
+                json: String::from_utf8(bytes).context("JSON must be UTF-8 text")?,
+            }
+        } else {
+            Mutation::SetString { key, value: bytes }
+        }))
     }
 }
 
@@ -272,11 +319,21 @@ impl Loaded {
     /// document of the JSON module stays JSON (saving it as a string would
     /// change the key's type).
     pub fn text_edit(&self, writable: bool) -> Option<TextEdit> {
+        self.text_source(writable).map(TextSource::into_edit)
+    }
+
+    /// The cheap half of [`Self::text_edit`]: the value copied out, for
+    /// [`TextSource::into_edit`] to decode away from the UI thread.
+    pub fn text_source(&self, writable: bool) -> Option<TextSource> {
         match &self.data {
-            ValueData::String(bytes) => {
-                Some(TextEdit::new(bytes.clone(), writable && !self.is_preview()))
-            }
-            ValueData::Json(json) => Some(TextEdit::json_document(json.clone(), writable)),
+            ValueData::String(bytes) => Some(TextSource::String {
+                bytes: bytes.clone(),
+                editable: writable && !self.is_preview(),
+            }),
+            ValueData::Json(json) => Some(TextSource::Json {
+                json: json.clone(),
+                writable,
+            }),
             _ => None,
         }
     }
@@ -285,17 +342,22 @@ impl Loaded {
     /// JSON value, or `None` if it would change nothing. Fails with the
     /// reason if the text does not fit its format.
     pub fn save_text(&self, edit: &TextEdit, edited: &str) -> Result<Option<Mutation>> {
-        let Some(bytes) = edit.to_save(edited)? else {
-            return Ok(None);
-        };
-        let key = self.key.clone();
-        Ok(Some(match self.data {
-            ValueData::Json(_) => Mutation::SetJson {
-                key,
-                json: String::from_utf8(bytes).context("JSON must be UTF-8 text")?,
-            },
-            _ => Mutation::SetString { key, value: bytes },
-        }))
+        self.text_target().save(edit, edited)
+    }
+
+    /// What [`Self::save_text`] needs of the value, for a front end that
+    /// encodes the text away from its UI thread.
+    pub fn text_target(&self) -> TextTarget {
+        TextTarget {
+            key: self.key.clone(),
+            json: matches!(self.data, ValueData::Json(_)),
+        }
+    }
+
+    /// Tells loads apart: a reload (or another key) gets another id, a
+    /// change patched into this value keeps it.
+    pub fn load_id(&self) -> u64 {
+        self.id
     }
 
     /// Whether only the beginning of a big string was loaded.

@@ -32,6 +32,9 @@ use crate::{
 };
 
 const ROW_HEIGHT: f32 = 26.;
+/// Rows whose value is at most this long open at once; longer ones are
+/// decoded off the UI thread.
+const SMALL_VALUE: usize = 64 << 10;
 /// The least room a header gives the key's name before its controls wrap.
 const MIN_NAME_WIDTH: f32 = 80.;
 /// Width of a narrow first column (list index, score, stream ID).
@@ -110,6 +113,9 @@ pub struct ValuePanel {
     scroll: UniformListScrollHandle,
     _load: Option<Task<()>>,
     _more: Option<Task<()>>,
+    /// Decoding a value for the panel off the UI thread (another format,
+    /// a big row, the text of a saved value); a newer one replaces it.
+    _decode: Option<Task<()>>,
 }
 
 impl EventEmitter<ValueEvent> for ValuePanel {}
@@ -132,6 +138,7 @@ impl ValuePanel {
             scroll: UniformListScrollHandle::new(),
             _load: None,
             _more: None,
+            _decode: None,
         }
     }
 
@@ -159,6 +166,7 @@ impl ValuePanel {
         self.loading = true;
         self.loading_more = false;
         self._more = None;
+        self._decode = None;
         cx.notify();
 
         let request = viewer::load(&self.client, key);
@@ -273,6 +281,7 @@ impl ValuePanel {
         self.loading_more = false;
         self._load = None;
         self._more = None;
+        self._decode = None;
         cx.notify();
     }
 
@@ -338,6 +347,9 @@ impl ValuePanel {
     }
 
     /// Shows a text in another format, carrying unsaved typing over.
+    /// Converting (inflating gzip, MessagePack to JSON, and back for the
+    /// typing) runs off the UI thread; typing meanwhile wins, and the
+    /// conversion is dropped.
     fn set_format(
         &mut self,
         pane: Pane,
@@ -349,28 +361,58 @@ impl ValuePanel {
             return;
         };
         let mut edit = current.edit.clone();
-        let typed = current.editor.read(cx).value().to_string();
-        let draft = current.dirty.then_some(typed.as_str());
-        if let Err(err) = edit.set_format(format, draft) {
-            window.push_notification(
-                Notification::error(format!("{err:#}"))
-                    .title(format!("Cannot show as {}", format.label())),
-                cx,
-            );
-            return;
-        }
-        let mut fresh = Self::text_pane(edit, window, cx);
-        fresh.dirty = draft.is_some() && fresh.edit.is_changed(fresh.edit.text());
-        match pane {
-            Pane::Value => self.text = Some(fresh),
-            Pane::Row => {
-                if let Some(row) = self.row.as_mut() {
-                    *row.edit.value_mut() = fresh.edit.clone();
-                    row.text = fresh;
+        let typed = current
+            .dirty
+            .then(|| current.editor.read(cx).value().to_string());
+        let editor = current.editor.entity_id();
+        self._decode = Some(cx.spawn_in(window, async move |this, cx| {
+            let converted = cx
+                .background_executor()
+                .spawn(async move {
+                    edit.set_format(format, typed.as_deref())?;
+                    let changed = typed.is_some() && edit.is_changed(edit.text());
+                    anyhow::Ok((edit, changed, typed))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                // Only onto the text it was converted from, as it was.
+                let Some(current) = this.pane(pane).filter(|p| p.editor.entity_id() == editor)
+                else {
+                    return;
+                };
+                let (edit, changed, typed) = match converted {
+                    Ok(converted) => converted,
+                    Err(err) => {
+                        window.push_notification(
+                            Notification::error(format!("{err:#}"))
+                                .title(format!("Cannot show as {}", format.label())),
+                            cx,
+                        );
+                        return;
+                    }
+                };
+                let typed_since = match &typed {
+                    Some(typed) => *current.editor.read(cx).value() != **typed,
+                    None => current.dirty,
+                };
+                if typed_since {
+                    return;
                 }
-            }
-        }
-        cx.notify();
+                let mut fresh = Self::text_pane(edit, window, cx);
+                fresh.dirty = changed;
+                match pane {
+                    Pane::Value => this.text = Some(fresh),
+                    Pane::Row => {
+                        if let Some(row) = this.row.as_mut() {
+                            *row.edit.value_mut() = fresh.edit.clone();
+                            row.text = fresh;
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Saves the open row if it was edited, else the whole value (⌘S).
@@ -386,52 +428,108 @@ impl ValuePanel {
     }
 
     fn save_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(loaded), Some(text)) = (self.loaded.as_ref(), self.text.as_mut()) else {
+        let (Some(loaded), Some(text)) = (self.loaded.as_ref(), self.text.as_ref()) else {
             return;
         };
-        let edited = text.editor.read(cx).value();
-        match loaded.save_text(&text.edit, &edited) {
-            Ok(Some(mutation)) => self.send(self.client.clone(), mutation, window, cx),
-            Ok(None) => {
-                text.dirty = false;
-                cx.notify();
-            }
-            Err(err) => window.push_notification(
-                Notification::error(format!("{err:#}")).title("Cannot save"),
-                cx,
-            ),
+        if self.saving {
+            return;
         }
+        let target = loaded.text_target();
+        let edit = text.edit.clone();
+        let edited = text.editor.read(cx).value().to_string();
+        let editor = text.editor.entity_id();
+        self.encode_and_send(
+            move || target.save(&edit, &edited),
+            move |this| {
+                if let Some(text) = this
+                    .text
+                    .as_mut()
+                    .filter(|t| t.editor.entity_id() == editor)
+                {
+                    text.dirty = false;
+                }
+            },
+            false,
+            window,
+            cx,
+        );
     }
 
     fn save_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(loaded), Some(row)) = (self.loaded.as_ref(), self.row.as_mut()) else {
+        let (Some(loaded), Some(row)) = (self.loaded.as_ref(), self.row.as_ref()) else {
             return;
         };
-        let value = row.text.editor.read(cx).value();
+        if self.saving {
+            return;
+        }
+        let value = row.text.editor.read(cx).value().to_string();
         // A name not typed into stands for the stored one, whatever the
         // input made of it.
         let name = row
             .name
             .as_ref()
             .filter(|_| row.name_dirty)
-            .map(|name| name.read(cx).value());
+            .map(|name| name.read(cx).value().to_string());
         // The key comes from the loaded value, which follows renames.
-        match loaded.save_row(&row.edit, &value, name.as_deref()) {
-            Ok(Some(mutation)) if !self.saving => {
-                self.saving_row = true;
-                self.send(self.client.clone(), mutation, window, cx);
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                row.text.dirty = false;
-                row.name_dirty = false;
+        let (key, edit) = (loaded.key.clone(), row.edit.clone());
+        let editor = row.text.editor.entity_id();
+        self.encode_and_send(
+            move || edit.save(&key, &value, name.as_deref()),
+            move |this| {
+                if let Some(row) = this
+                    .row
+                    .as_mut()
+                    .filter(|row| row.text.editor.entity_id() == editor)
+                {
+                    row.text.dirty = false;
+                    row.name_dirty = false;
+                }
+            },
+            true,
+            window,
+            cx,
+        );
+    }
+
+    /// Makes the change that saves an edit with `encode` (gzip, MessagePack
+    /// and JSON encoding take a while for big values: off the UI thread),
+    /// then sends it. `unchanged` runs if it would change nothing; `row`
+    /// says it is the open row's save. Saving shows meanwhile, and a second
+    /// save waits for this one.
+    fn encode_and_send(
+        &mut self,
+        encode: impl FnOnce() -> anyhow::Result<Option<Mutation>> + Send + 'static,
+        unchanged: impl FnOnce(&mut Self) + 'static,
+        row: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saving = true;
+        cx.notify();
+        let client = self.client.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let encoded = cx
+                .background_executor()
+                .spawn(async move { encode() })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                match encoded {
+                    Ok(Some(mutation)) => {
+                        this.saving_row = row;
+                        this.send(client, mutation, window, cx);
+                    }
+                    Ok(None) => unchanged(this),
+                    Err(err) => window.push_notification(
+                        Notification::error(format!("{err:#}")).title("Cannot save"),
+                        cx,
+                    ),
+                }
                 cx.notify();
-            }
-            Err(err) => window.push_notification(
-                Notification::error(format!("{err:#}")).title("Cannot save"),
-                cx,
-            ),
-        }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Discards the open row's edits.
@@ -677,14 +775,41 @@ impl ValuePanel {
                     mutation,
                     Mutation::SetString { .. } | Mutation::SetJson { .. }
                 ) {
-                    // The text now stands for the saved bytes.
-                    let edit = loaded.text_edit(!self.client.config().read_only);
+                    // The text now stands for the saved bytes, decoded off
+                    // the UI thread; until then the editor shows what was
+                    // typed, which is what was saved.
+                    let source = loaded.text_source(!self.client.config().read_only);
                     let format = self.text.as_ref().map(|text| text.edit.format());
-                    self.text = edit.map(|mut edit| {
-                        if let Some(format) = format {
-                            let _ = edit.set_format(format, None);
-                        }
-                        Self::text_pane(edit, window, cx)
+                    if let Some(text) = self.text.as_mut() {
+                        text.dirty = false;
+                    }
+                    let (load, editor) = (
+                        loaded.load_id(),
+                        self.text.as_ref().map(|text| text.editor.entity_id()),
+                    );
+                    self._decode = source.map(|source| {
+                        cx.spawn_in(window, async move |this, cx| {
+                            let edit = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    let mut edit = source.into_edit();
+                                    if let Some(format) = format {
+                                        let _ = edit.set_format(format, None);
+                                    }
+                                    edit
+                                })
+                                .await;
+                            this.update_in(cx, |this, window, cx| {
+                                let same = this.loaded.as_ref().map(Loaded::load_id) == Some(load)
+                                    && this.text.as_ref().map(|text| text.editor.entity_id())
+                                        == editor;
+                                if same {
+                                    this.text = Some(Self::text_pane(edit, window, cx));
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        })
                     });
                 }
                 if row_change && keep_row {
@@ -879,16 +1004,42 @@ impl ValuePanel {
     }
 
     /// Opens row `ix` in the detail pane, editable on a writable connection.
+    /// A big value is decoded off the UI thread first (detecting its
+    /// format, inflating, pretty-printing JSON); the pane shows once it is.
     fn open_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let writable = self.rows_editable();
-        let Some(edit) = self
+        let Some((source, load)) = self
             .loaded
             .as_ref()
-            .and_then(|loaded| loaded.row_edit(ix, writable))
+            .and_then(|loaded| Some((loaded.row_source(ix, writable)?, loaded.load_id())))
         else {
             self.row = None;
             return;
         };
+        self._decode = None;
+        if source.len() <= SMALL_VALUE {
+            self.show_row(source.into_edit(), window, cx);
+            return;
+        }
+        self.row = None;
+        self._decode = Some(cx.spawn_in(window, async move |this, cx| {
+            let edit = cx
+                .background_executor()
+                .spawn(async move { source.into_edit() })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                // Not onto another value, or a row opened since.
+                if this.loaded.as_ref().map(Loaded::load_id) == Some(load) && this.row.is_none() {
+                    this.show_row(edit, window, cx);
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Shows `edit` in the detail pane.
+    fn show_row(&mut self, edit: RowEdit, window: &mut Window, cx: &mut Context<Self>) {
         let text = Self::text_pane(edit.value().clone(), window, cx);
         let (name, subscription) = match edit.name() {
             Some(field) => {

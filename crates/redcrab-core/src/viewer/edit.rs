@@ -628,6 +628,39 @@ pub struct RowEdit {
     name: Option<NameField>,
 }
 
+/// A row's value copied out of a [`Loaded`] value, to make its
+/// [`RowEdit`] from ([`Loaded::row_source`]).
+#[derive(Clone, Debug)]
+pub struct RowSource {
+    row: usize,
+    target: Target,
+    bytes: Vec<u8>,
+    allowed: bool,
+    name: Option<NameField>,
+}
+
+impl RowSource {
+    /// The size of the value, to tell whether decoding it is worth moving
+    /// off the UI thread.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Detects the value's format and decodes it for editing.
+    pub fn into_edit(self) -> RowEdit {
+        RowEdit {
+            row: self.row,
+            target: self.target,
+            value: TextEdit::new(self.bytes, self.allowed),
+            name: self.name,
+        }
+    }
+}
+
 impl RowEdit {
     /// The row's index in the loaded value.
     pub fn row(&self) -> usize {
@@ -655,7 +688,11 @@ impl RowEdit {
 
     /// The change to `key` that saves the row as edited; see
     /// [`Loaded::save_row`].
-    fn save(&self, key: &Key, value: &str, name: Option<&str>) -> Result<Option<Mutation>> {
+    /// The change that saves this row of `key` as edited: what
+    /// [`Loaded::save_row`] does, for a front end that runs it away from
+    /// its UI thread (encoding a big value takes a while) with the key it
+    /// read from the loaded value.
+    pub fn save(&self, key: &Key, value: &str, name: Option<&str>) -> Result<Option<Mutation>> {
         // Untouched text stands for the stored bytes, editable or not.
         let new_value = self.value.to_save(value)?;
         // The name input's text, if it was changed.
@@ -970,6 +1007,14 @@ impl Loaded {
     /// Row `ix` of a collection, opened for editing; `writable` is whether
     /// the connection allows changes.
     pub fn row_edit(&self, ix: usize, writable: bool) -> Option<RowEdit> {
+        self.row_source(ix, writable).map(RowSource::into_edit)
+    }
+
+    /// The cheap half of [`Self::row_edit`]: row `ix`'s value, copied out.
+    /// [`RowSource::into_edit`] does the rest (detecting and decoding the
+    /// format, which takes a while for a big value), away from the UI
+    /// thread if need be.
+    pub fn row_source(&self, ix: usize, writable: bool) -> Option<RowSource> {
         let (target, bytes, name) = match &self.data {
             ValueData::Hash(pairs) => {
                 let (field, value) = pairs.get(ix)?;
@@ -1036,10 +1081,11 @@ impl Loaded {
             _ => return None,
         };
         let allowed = writable && target != Target::Stream;
-        Some(RowEdit {
+        Some(RowSource {
             row: ix,
             target,
-            value: TextEdit::new(bytes, allowed),
+            bytes,
+            allowed,
             name,
         })
     }
