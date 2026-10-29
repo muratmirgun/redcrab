@@ -1,6 +1,6 @@
-//! redcrab in a terminal: the desktop app's connections, key tree, values
-//! and console, on the same `redcrab-core`, for a server reached over SSH
-//! or a machine without a GPU.
+//! redcrab in a terminal: the desktop app's connections, key tree, values,
+//! console, server tools, memory analysis and Pub/Sub, on the same
+//! `redcrab-core`, for a server reached over SSH or a machine without a GPU.
 //!
 //! `redcrab-tui` opens the saved connections; `redcrab-tui <name>` connects
 //! to a saved one, `redcrab-tui redis://host:port/db` to a URL.
@@ -11,7 +11,11 @@ mod console;
 mod editor;
 mod input;
 mod keys;
+mod list;
+mod memory;
 mod popup;
+mod pubsub;
+mod server;
 #[cfg(test)]
 mod tests;
 mod theme;

@@ -23,6 +23,7 @@ use redcrab_core::{
 use crate::{
     app::{Ctx, Task, Tone},
     editor::EditRequest,
+    list::fit,
     popup::{self, Ask, Confirm},
     theme,
 };
@@ -146,6 +147,11 @@ impl ValuePane {
             .as_ref()
             .map(|loaded| &loaded.key)
             .or(self.loading.as_ref().map(|(key, _)| key))
+    }
+
+    #[cfg(test)]
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
     }
 
     pub fn clear(&mut self) {
@@ -830,18 +836,6 @@ fn extension(text: &TextEdit) -> &'static str {
         ValueFormat::Json | ValueFormat::MessagePack => "json",
         _ if text.view().is_json => "json",
         _ => "txt",
-    }
-}
-
-/// `text` cut to `width` characters, with an ellipsis when cut, and padded.
-fn fit(text: &str, width: usize) -> String {
-    let count = text.chars().count();
-    if count > width {
-        let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-        cut.push('…');
-        cut
-    } else {
-        format!("{text}{}", " ".repeat(width - count))
     }
 }
 

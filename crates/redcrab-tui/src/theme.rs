@@ -1,7 +1,10 @@
 //! Colors, as RGB so that they look the same on every terminal theme that
 //! has true color; terminals without it map them to the nearest.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 use redcrab_core::{Environment, KeyType};
 
 pub const BACKGROUND: Color = Color::Rgb(16, 16, 18);
@@ -16,6 +19,13 @@ pub const SUCCESS: Color = Color::Rgb(74, 222, 128);
 pub const WARNING: Color = Color::Rgb(250, 204, 21);
 pub const DANGER: Color = Color::Rgb(239, 68, 68);
 pub const INFO: Color = Color::Rgb(96, 165, 250);
+/// The overview's charts: operations, memory, clients, hit rate.
+pub const CHARTS: [Color; 4] = [
+    Color::Rgb(96, 165, 250),
+    Color::Rgb(192, 132, 252),
+    Color::Rgb(74, 222, 128),
+    Color::Rgb(250, 204, 21),
+];
 
 pub fn muted() -> Style {
     Style::new().fg(MUTED)
@@ -41,6 +51,23 @@ pub fn selected(focused: bool) -> Style {
     } else {
         style
     }
+}
+
+/// Tabs: `labels` side by side, the one at `active` lit.
+pub fn tabs(labels: &[&str], active: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (ix, label) in labels.iter().enumerate() {
+        if ix > 0 {
+            spans.push(Span::styled("│", Style::new().fg(BORDER)));
+        }
+        let style = if ix == active {
+            Style::new().fg(BACKGROUND).bg(ACCENT).bold()
+        } else {
+            muted()
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+    }
+    Line::from(spans)
 }
 
 /// A key type's color, as the desktop app paints its badges.

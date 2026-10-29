@@ -1,6 +1,6 @@
 [package]
 name = "redcrab-tui"
-description = "redcrab in a terminal: keys, values and a console for Redis and Valkey"
+description = "redcrab in a terminal: keys, values, a console and the server tools for Redis and Valkey"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,8 @@ futures.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Local time for the Pub/Sub and MONITOR feeds.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The crossterm backend only, on the crossterm ratatui is built for, with
 # its async event stream for the event loop.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "layout-cache", "underline-color"] }

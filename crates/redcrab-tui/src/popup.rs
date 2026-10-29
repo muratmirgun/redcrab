@@ -1,7 +1,7 @@
-//! Windows over the screen: the key help, a yes-or-no question, and a
-//! question with a line to type.
+//! Windows over the screen: the key help, a yes-or-no question, a question
+//! with a line to type, and a text to read.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Margin, Rect},
@@ -31,8 +31,10 @@ fn frame_block(title: &str, tone: Style) -> Block<'_> {
         .style(Style::new().bg(theme::BACKGROUND))
 }
 
-/// The keys, as `(keys, what they do)`, with a heading where `keys` is empty.
-pub fn help(frame: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
+/// The keys, as `(keys, what they do)`, with a heading where `keys` is
+/// empty, from line `scroll` on when they do not all fit. Returns the
+/// scroll used, at most the one that shows the last line.
+pub fn help(frame: &mut Frame, area: Rect, keys: &[(&str, &str)], scroll: u16) -> u16 {
     let lines: Vec<Line> = keys
         .iter()
         .map(|(keys, what)| {
@@ -47,16 +49,23 @@ pub fn help(frame: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
         })
         .collect();
     let rect = centered(area, 72, lines.len() as u16 + 4);
+    // Lines past the window, borders and a blank line taken.
+    let hidden = (lines.len() as u16 + 2).saturating_sub(rect.height);
+    let scroll = scroll.min(hidden);
+    let title = if hidden > 0 {
+        "Keyboard · j k scroll · any other key closes"
+    } else {
+        "Keyboard · any key closes"
+    };
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(frame_block(
-                "Keys · any key closes",
-                Style::new().fg(theme::ACCENT),
-            ))
-            .wrap(Wrap { trim: false }),
+            .block(frame_block(title, Style::new().fg(theme::ACCENT)))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         rect,
     );
+    scroll
 }
 
 /// A question to answer with Enter or y (yes) and Esc or n (no).
@@ -175,5 +184,58 @@ impl Ask {
             None => Paragraph::new(self.note.clone()).style(theme::muted()),
         };
         frame.render_widget(note.wrap(Wrap { trim: true }), note_area);
+    }
+}
+
+/// A text to read in a window: a whole command, a message's payload, a
+/// client's every field. j k scroll it; any other key closes it.
+pub struct Reading {
+    pub title: String,
+    pub text: String,
+    scroll: u16,
+}
+
+impl Reading {
+    pub fn new(title: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            text: text.into(),
+            scroll: 0,
+        }
+    }
+
+    /// Whether it stays open.
+    pub fn on_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        self.scroll = match key.code {
+            KeyCode::Down | KeyCode::Char('j') => self.scroll.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => self.scroll.saturating_sub(1),
+            KeyCode::PageDown => self.scroll.saturating_add(20),
+            KeyCode::Char('d') if ctrl => self.scroll.saturating_add(10),
+            KeyCode::PageUp => self.scroll.saturating_sub(20),
+            KeyCode::Char('u') if ctrl => self.scroll.saturating_sub(10),
+            KeyCode::Home | KeyCode::Char('g') => 0,
+            _ => return false,
+        };
+        true
+    }
+
+    pub fn draw(&self, frame: &mut Frame, area: Rect) {
+        let rect = centered(
+            area,
+            area.width.saturating_sub(6),
+            area.height.saturating_sub(4),
+        );
+        frame.render_widget(Clear, rect);
+        let block = frame_block(&self.title, Style::new().fg(theme::ACCENT))
+            .title_bottom(Line::from(" j k scroll · any other key closes ").style(theme::muted()));
+        frame.render_widget(
+            Paragraph::new(self.text.clone())
+                .block(block)
+                .style(Style::new().fg(theme::TEXT))
+                .wrap(Wrap { trim: false })
+                .scroll((self.scroll, 0)),
+            rect,
+        );
     }
 }

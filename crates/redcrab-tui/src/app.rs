@@ -75,6 +75,23 @@ impl Jobs {
     }
 }
 
+/// `stream`'s items, at most one every `every`: for a stream that keeps
+/// only its latest item (a walk's progress, a feed's count), so that the
+/// screen redraws at a pace and not at every item.
+pub fn paced<S>(stream: S, every: Duration) -> impl Stream<Item = S::Item> + Send + 'static
+where
+    S: Stream + Unpin + Send + 'static,
+    S::Item: Send,
+{
+    futures::stream::unfold((stream, false), move |(mut stream, wait)| async move {
+        if wait {
+            tokio::time::sleep(every).await;
+        }
+        let item = stream.next().await?;
+        Some((item, (stream, true)))
+    })
+}
+
 /// A request on its way; dropping it abandons it.
 pub struct Task(tokio::task::AbortHandle);
 
@@ -135,7 +152,8 @@ pub enum Screen {
 pub struct App {
     pub ctx: Ctx,
     pub screen: Screen,
-    help: bool,
+    /// The key help, open, scrolled this far.
+    help: Option<u16>,
     rx: UnboundedReceiver<Job>,
 }
 
@@ -162,7 +180,7 @@ impl App {
         Self {
             ctx,
             screen,
-            help: false,
+            help: None,
             rx,
         }
     }
@@ -217,8 +235,12 @@ impl App {
             self.ctx.quit = true;
             return;
         }
-        if self.help {
-            self.help = false;
+        if let Some(scroll) = self.help {
+            self.help = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => Some(scroll.saturating_add(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(scroll.saturating_sub(1)),
+                _ => None,
+            };
             return;
         }
         let handled = match &mut self.screen {
@@ -229,7 +251,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('?') => self.help = Some(0),
             KeyCode::Char('q') => self.ctx.quit = true,
             _ => {}
         }
@@ -282,12 +304,12 @@ impl App {
         if let Some(toast) = &self.ctx.toast {
             draw_toast(frame, area, toast);
         }
-        if self.help {
+        if let Some(scroll) = self.help {
             let keys = match &self.screen {
-                Screen::Connect(_) => crate::connect::HELP,
-                Screen::Workspace(_) => crate::workspace::HELP,
+                Screen::Connect(_) => crate::connect::HELP.to_vec(),
+                Screen::Workspace(workspace) => workspace.help(),
             };
-            popup::help(frame, area, keys);
+            self.help = Some(popup::help(frame, area, &keys, scroll));
         }
     }
 
@@ -346,7 +368,7 @@ impl App {
         Self {
             ctx,
             screen,
-            help: false,
+            help: None,
             rx,
         }
     }

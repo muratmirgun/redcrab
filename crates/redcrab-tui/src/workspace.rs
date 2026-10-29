@@ -1,6 +1,8 @@
-//! One connected server: the key tree on the left, the value on the right,
-//! the console under them when open, and a status line. Questions (a TTL,
-//! a delete) open over it; Tab moves between the panes.
+//! One connected server, in four views as on the desktop (1 to 4): the
+//! keys (the key tree on the left, the value on the right, the console
+//! under them when open), the server tools, the memory analysis, and
+//! Pub/Sub. A status line under them; questions (a TTL, a delete) open over
+//! them.
 
 use std::time::Duration;
 
@@ -21,21 +23,31 @@ use crate::{
     app::{Ctx, Task, Tone},
     console::ConsolePane,
     keys::{KeysAction, KeysPane},
-    popup::{Answer, Ask, Confirm, Typed},
+    memory::{self, MemoryView},
+    popup::{Answer, Ask, Confirm, Reading, Typed},
+    pubsub::{self, PubSubAsk, PubSubView},
+    server::{self, ServerConfirm, ServerView},
     theme,
     value::{Answered, AskFor, Changed, ConfirmFor, Request, Sent, ValuePane},
 };
 
-pub const HELP: &[(&str, &str)] = &[
+/// The keys of every view, under the view's own.
+const ANYWHERE: &[(&str, &str)] = &[
     ("", "Anywhere"),
+    ("1 2 3 4", "Keys, Server, Memory, Pub/Sub"),
+    (":  Ctrl-J", "the console, in Keys"),
+    ("b", "switch to another database"),
+    ("Q", "disconnect, back to the connections"),
+    ("q  Ctrl-C", "quit"),
+];
+
+const KEYS_HELP: &[(&str, &str)] = &[
+    ("", "Keys"),
     ("Tab  Shift-Tab", "next or previous pane"),
     (":  Ctrl-J", "open the console, or close it"),
     ("n", "new key"),
     ("D", "delete the key shown"),
-    ("b", "switch to another database"),
-    ("Q", "disconnect, back to the connections"),
-    ("q  Ctrl-C", "quit"),
-    ("", "Keys"),
+    ("", "Key tree"),
     ("j k  ↓ ↑", "move; Ctrl-D Ctrl-U a page, g G the ends"),
     ("l h  → ←", "open or close a folder"),
     ("Enter", "open a folder, or go to the value"),
@@ -57,6 +69,27 @@ pub const HELP: &[(&str, &str)] = &[
     ("Esc", "close suggestions, stop a command, back to the keys"),
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Keys,
+    Server,
+    Memory,
+    PubSub,
+}
+
+impl View {
+    const ALL: [Self; 4] = [Self::Keys, Self::Server, Self::Memory, Self::PubSub];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Keys => "Keys",
+            Self::Server => "Server",
+            Self::Memory => "Memory",
+            Self::PubSub => "Pub/Sub",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Keys,
@@ -64,25 +97,39 @@ enum Focus {
     Console,
 }
 
-enum AskWhat {
+/// What a line typed in a question is for.
+pub enum AskWhat {
     Value(AskFor),
     Db,
     NewKey(NewKey),
+    PubSub(PubSubAsk),
 }
 
-enum ConfirmWhat {
+/// What a yes to a question does.
+pub enum ConfirmWhat {
     Value(ConfirmFor),
     DeleteKey(Key),
+    Server(ServerConfirm),
+}
+
+/// What a view other than the keys asks of the workspace.
+pub enum ViewRequest {
+    Ask(Ask, AskWhat),
+    Confirm(Confirm, ConfirmWhat),
+    Read(Reading),
+    /// Show this key in the keys view.
+    OpenKey(Key),
 }
 
 enum Modal {
     Ask(Ask, AskWhat),
     Confirm(Confirm, ConfirmWhat),
+    Read(Reading),
 }
 
 /// A new key, asked for one line at a time.
 #[derive(Clone)]
-struct NewKey {
+pub struct NewKey {
     ty: Option<NewKeyType>,
     name: Option<String>,
     field: Option<String>,
@@ -97,6 +144,13 @@ pub struct Workspace {
     pub console: ConsolePane,
     show_console: bool,
     focus: Focus,
+    view: View,
+    /// Made the first time the server tools are shown.
+    pub server: Option<ServerView>,
+    /// Made the first time the memory analysis is shown.
+    pub memory: Option<MemoryView>,
+    /// Made the first time Pub/Sub is shown.
+    pub pubsub: Option<PubSubView>,
     modal: Option<Modal>,
     info: Option<ServerInfo>,
     latency: Option<Duration>,
@@ -118,6 +172,10 @@ impl Workspace {
             client,
             show_console: false,
             focus: Focus::Keys,
+            view: View::Keys,
+            server: None,
+            memory: None,
+            pubsub: None,
             modal: None,
             info: None,
             latency: None,
@@ -141,6 +199,68 @@ impl Workspace {
 
     fn writable(&self) -> bool {
         !self.client.config().read_only
+    }
+
+    /// The keys of the view shown, then the ones of every view.
+    pub fn help(&self) -> Vec<(&'static str, &'static str)> {
+        let view = match self.view {
+            View::Keys => KEYS_HELP,
+            View::Server => server::HELP,
+            View::Memory => memory::HELP,
+            View::PubSub => pubsub::HELP,
+        };
+        view.iter().chain(ANYWHERE).copied().collect()
+    }
+
+    /// Shows a view, made the first time. The server tools ask the server
+    /// only while shown; MONITOR stops when Pub/Sub is hidden.
+    pub fn show(&mut self, view: View, ctx: &mut Ctx) {
+        if view == self.view {
+            return;
+        }
+        self.view = view;
+        match view {
+            View::Server if self.server.is_none() => {
+                self.server = Some(ServerView::new(self.client.clone(), self.id, ctx));
+            }
+            View::Memory if self.memory.is_none() => {
+                self.memory = Some(MemoryView::new(self.client.clone(), self.id));
+            }
+            View::PubSub if self.pubsub.is_none() => {
+                self.pubsub = Some(PubSubView::new(self.client.clone(), self.id, ctx));
+            }
+            _ => {}
+        }
+        if let Some(server) = &mut self.server {
+            server.set_shown(view == View::Server, ctx);
+        }
+        if let Some(pubsub) = &mut self.pubsub {
+            pubsub.set_shown(view == View::PubSub);
+        }
+    }
+
+    /// Shows `key` in the keys view: selected in the tree (added to it if
+    /// the filter left it out) and its value loaded.
+    fn open_key(&mut self, key: Key, ctx: &mut Ctx) {
+        self.show(View::Keys, ctx);
+        self.keys.add_key(&key, ctx);
+        self.value.load(key, ctx);
+        self.focus = Focus::Value;
+    }
+
+    #[cfg(test)]
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Whether a line is being typed in, which takes the printable keys.
+    fn typing(&self) -> bool {
+        match self.view {
+            View::Keys => self.focus == Focus::Console || self.keys.filtering,
+            View::Server => self.server.as_ref().is_some_and(|v| v.filtering),
+            View::Memory => false,
+            View::PubSub => self.pubsub.as_ref().is_some_and(|v| v.filtering),
+        }
     }
 
     /// Server stats for the status line, now and every five seconds.
@@ -178,6 +298,15 @@ impl Workspace {
         self.keys = KeysPane::new(client.clone(), self.id, ctx);
         self.value = ValuePane::new(client.clone(), self.id);
         self.console.set_client(&client);
+        if let Some(server) = &mut self.server {
+            server.set_client(client.clone(), ctx);
+        }
+        if let Some(memory) = &mut self.memory {
+            memory.set_client(client.clone());
+        }
+        if let Some(pubsub) = &mut self.pubsub {
+            pubsub.set_client(client.clone());
+        }
         self.focus = Focus::Keys;
         self.poll(ctx);
     }
@@ -185,11 +314,24 @@ impl Workspace {
     pub fn on_paste(&mut self, text: &str, _: &mut Ctx) {
         match &mut self.modal {
             Some(Modal::Ask(ask, _)) => ask.input.insert(text),
-            Some(Modal::Confirm(..)) => {}
-            None => match self.focus {
-                Focus::Keys => self.keys.on_paste(text),
-                Focus::Console => self.console.on_paste(text),
-                Focus::Value => {}
+            Some(Modal::Confirm(..) | Modal::Read(_)) => {}
+            None => match self.view {
+                View::Keys => match self.focus {
+                    Focus::Keys => self.keys.on_paste(text),
+                    Focus::Console => self.console.on_paste(text),
+                    Focus::Value => {}
+                },
+                View::Server => {
+                    if let Some(server) = &mut self.server {
+                        server.on_paste(text);
+                    }
+                }
+                View::Memory => {}
+                View::PubSub => {
+                    if let Some(pubsub) = &mut self.pubsub {
+                        pubsub.on_paste(text);
+                    }
+                }
             },
         }
     }
@@ -199,6 +341,82 @@ impl Workspace {
             self.on_modal_key(key, ctx);
             return true;
         }
+        let handled = match self.view {
+            View::Keys => return self.on_keys_key(key, ctx) || self.on_any_key(key, ctx),
+            View::Server => self.server.as_mut().and_then(|v| v.on_key(key, ctx)),
+            View::Memory => self.memory.as_mut().and_then(|v| v.on_key(key, ctx)),
+            View::PubSub => self.pubsub.as_mut().and_then(|v| v.on_key(key, ctx)),
+        };
+        match handled {
+            Some(request) => {
+                if let Some(request) = request {
+                    self.request(request, ctx);
+                }
+                true
+            }
+            None => self.on_any_key(key, ctx),
+        }
+    }
+
+    /// The keys of every view: another view, the console, another
+    /// database, disconnecting.
+    fn on_any_key(&mut self, key: KeyEvent, ctx: &mut Ctx) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let typing = self.typing();
+        match key.code {
+            KeyCode::Char('j') if ctrl => {
+                if self.view == View::Keys {
+                    self.toggle_console();
+                } else {
+                    self.show(View::Keys, ctx);
+                    self.show_console = true;
+                    self.focus = Focus::Console;
+                }
+            }
+            KeyCode::Char(':') if !typing => {
+                self.show(View::Keys, ctx);
+                self.show_console = true;
+                self.focus = Focus::Console;
+            }
+            KeyCode::Char(digit @ '1'..='4') if !typing && !ctrl => {
+                let ix = digit as usize - '1' as usize;
+                self.show(View::ALL[ix], ctx);
+            }
+            KeyCode::Char('b') if !typing => {
+                if self.client.topology().supports_databases() {
+                    self.modal = Some(Modal::Ask(
+                        Ask::new(
+                            "Switch database",
+                            "The database number, e.g. 3.",
+                            self.client.config().db.to_string(),
+                        ),
+                        AskWhat::Db,
+                    ));
+                } else {
+                    ctx.notify(Tone::Info, "A cluster has one database.");
+                }
+            }
+            KeyCode::Char('Q') if !typing => {
+                self.disconnect = Some(self.client.config().without_secrets());
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn request(&mut self, request: ViewRequest, ctx: &mut Ctx) {
+        match request {
+            ViewRequest::Ask(ask, about) => self.modal = Some(Modal::Ask(ask, about)),
+            ViewRequest::Confirm(confirm, about) => {
+                self.modal = Some(Modal::Confirm(confirm, about));
+            }
+            ViewRequest::Read(reading) => self.modal = Some(Modal::Read(reading)),
+            ViewRequest::OpenKey(key) => self.open_key(key, ctx),
+        }
+    }
+
+    /// The keys of the keys view: its panes first, then its own.
+    fn on_keys_key(&mut self, key: KeyEvent, ctx: &mut Ctx) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // The pane with focus first: typing in a filter or the console
         // takes every printable key.
@@ -237,15 +455,10 @@ impl Workspace {
         if handled {
             return true;
         }
-        let typing = self.focus == Focus::Console || self.keys.filtering;
+        let typing = self.typing();
         match key.code {
             KeyCode::Tab => self.focus = self.next_focus(true),
             KeyCode::BackTab => self.focus = self.next_focus(false),
-            KeyCode::Char('j') if ctrl => self.toggle_console(),
-            KeyCode::Char(':') if !typing => {
-                self.show_console = true;
-                self.focus = Focus::Console;
-            }
             KeyCode::Esc if self.focus == Focus::Value => self.focus = Focus::Keys,
             KeyCode::Char('r') if ctrl => self.value.reload(ctx),
             KeyCode::Char('n') if !typing => self.ask_new_key(NewKey {
@@ -255,23 +468,6 @@ impl Workspace {
                 value: None,
             }),
             KeyCode::Char('D') if !typing => self.ask_to_delete_key(),
-            KeyCode::Char('b') if !typing => {
-                if self.client.topology().supports_databases() {
-                    self.modal = Some(Modal::Ask(
-                        Ask::new(
-                            "Switch database",
-                            "The database number, e.g. 3.",
-                            self.client.config().db.to_string(),
-                        ),
-                        AskWhat::Db,
-                    ));
-                } else {
-                    ctx.notify(Tone::Info, "A cluster has one database.");
-                }
-            }
-            KeyCode::Char('Q') if !typing => {
-                self.disconnect = Some(self.client.config().without_secrets());
-            }
             // Value keys work from the key list too, on the key shown.
             KeyCode::Char('t' | 'R' | 'e' | 'f' | 'a' | 'A') if self.focus == Focus::Keys => {
                 if let Some(Some(request)) = self.value.on_key(key, ctx) {
@@ -375,6 +571,11 @@ impl Workspace {
                 Answer::Yes => match about {
                     ConfirmWhat::Value(about) => self.value.confirmed(about, ctx),
                     ConfirmWhat::DeleteKey(key) => self.delete_key(key, ctx),
+                    ConfirmWhat::Server(about) => {
+                        if let Some(server) = &mut self.server {
+                            server.confirmed(about, ctx);
+                        }
+                    }
                 },
                 Answer::No => {}
                 Answer::Pending => self.modal = Some(Modal::Confirm(confirm, about)),
@@ -384,6 +585,11 @@ impl Workspace {
                 Typed::Cancelled => {}
                 Typed::Pending => self.modal = Some(Modal::Ask(ask, about)),
             },
+            Some(Modal::Read(mut reading)) => {
+                if reading.on_key(key) {
+                    self.modal = Some(Modal::Read(reading));
+                }
+            }
             None => {}
         }
     }
@@ -398,6 +604,19 @@ impl Workspace {
                     self.modal = Some(Modal::Ask(ask, AskWhat::Value(about)));
                 }
             },
+            AskWhat::PubSub(about) => {
+                let Some(pubsub) = &mut self.pubsub else {
+                    return;
+                };
+                match pubsub.answered(about.clone(), text, ctx) {
+                    Ok(Some(next)) => self.request(next, ctx),
+                    Ok(None) => {}
+                    Err(problem) => {
+                        ask.problem = Some(problem);
+                        self.modal = Some(Modal::Ask(ask, AskWhat::PubSub(about)));
+                    }
+                }
+            }
             AskWhat::Db => match text.trim().parse::<u32>() {
                 Ok(db) => self.switch_db(db, ctx),
                 Err(_) => {
@@ -534,6 +753,35 @@ impl Workspace {
         ])
         .areas(area);
         self.draw_header(frame, header);
+        let modal_open = self.modal.is_some();
+        match self.view {
+            View::Keys => self.draw_keys(frame, body, ctx),
+            View::Server => {
+                if let Some(server) = &mut self.server {
+                    server.draw(frame, body, !modal_open, ctx);
+                }
+            }
+            View::Memory => {
+                if let Some(memory) = &mut self.memory {
+                    memory.draw(frame, body, !modal_open, ctx);
+                }
+            }
+            View::PubSub => {
+                if let Some(pubsub) = &mut self.pubsub {
+                    pubsub.draw(frame, body, !modal_open, ctx);
+                }
+            }
+        }
+        self.draw_status(frame, status);
+        match &self.modal {
+            Some(Modal::Ask(ask, _)) => ask.draw(frame, area),
+            Some(Modal::Confirm(confirm, _)) => confirm.draw(frame, area),
+            Some(Modal::Read(reading)) => reading.draw(frame, area),
+            None => {}
+        }
+    }
+
+    fn draw_keys(&mut self, frame: &mut Frame, body: Rect, ctx: &Ctx) {
         let (panes, console) = if self.show_console {
             let [panes, console] =
                 Layout::vertical([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -557,12 +805,6 @@ impl Workspace {
                 self.focus == Focus::Console && !modal_open,
                 ctx,
             );
-        }
-        self.draw_status(frame, status);
-        match &self.modal {
-            Some(Modal::Ask(ask, _)) => ask.draw(frame, area),
-            Some(Modal::Confirm(confirm, _)) => confirm.draw(frame, area),
-            None => {}
         }
     }
 
@@ -593,9 +835,29 @@ impl Workspace {
                 Style::new().fg(theme::BACKGROUND).bg(theme::INFO).bold(),
             ));
         }
-        let right = Span::styled("? keys ", theme::muted());
-        let [left_area, right_area] =
-            Layout::horizontal([Constraint::Fill(1), Constraint::Length(8)]).areas(area);
+        // Every view's name when there is room, the shown one's otherwise.
+        let wide = area.width >= 100;
+        let labels: Vec<String> = View::ALL
+            .iter()
+            .enumerate()
+            .map(|(ix, view)| {
+                if wide || *view == self.view {
+                    format!("{} {}", ix + 1, view.label())
+                } else {
+                    (ix + 1).to_string()
+                }
+            })
+            .collect();
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let at = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
+        let tabs = theme::tabs(&labels, at);
+        let right = Span::styled(" ? keys ", theme::muted());
+        let [left_area, tabs_area, right_area] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(tabs.width() as u16),
+            Constraint::Length(9),
+        ])
+        .areas(area);
         // A production connection is marked along the whole line.
         let style = match theme::environment(config.environment) {
             Some(color) if config.environment == redcrab_core::Environment::Production => {
@@ -604,6 +866,7 @@ impl Workspace {
             _ => Style::new(),
         };
         frame.render_widget(Paragraph::new(Line::from(spans)).style(style), left_area);
+        frame.render_widget(Paragraph::new(tabs), tabs_area);
         frame.render_widget(Paragraph::new(right), right_area);
     }
 

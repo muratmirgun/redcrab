@@ -273,7 +273,8 @@ connections:
 
 `redcrab-tui` is redcrab in a terminal, for a server reached over SSH or a machine
 without a GPU: the same saved connections and passwords, the key tree, values of every
-type, editing and the console, on the same core.
+type, editing and the console, the server tools, the memory analysis and Pub/Sub, on the
+same core.
 
 ```sh
 redcrab-tui                          # pick a saved connection
@@ -289,8 +290,17 @@ next pane, <kbd>:</kbd> for the console, <kbd>?</kbd> for all of them. In the va
 <kbd>R</kbd> renames the key, <kbd>a</kbd> adds a row and <kbd>x</kbd> deletes the rows
 picked with <kbd>Space</kbd>. <kbd>n</kbd> makes a key, <kbd>D</kbd> deletes one, and
 <kbd>b</kbd> switches the database. A read-only connection stays read-only here too.
-Connections are added and edited in the desktop app; the server tools, the memory
-analysis and Pub/Sub are there too, for now.
+
+<kbd>1</kbd> to <kbd>4</kbd> switch between the keys, the server tools, the memory
+analysis and Pub/Sub, as on the desktop. The server tools page with <kbd>[</kbd>
+<kbd>]</kbd> through the overview (figures with two minutes of trends), the slow log,
+the clients (<kbd>x</kbd> kills one) and INFO, and with <kbd>&lt;</kbd> <kbd>&gt;</kbd>
+through the primaries of a cluster. The memory analysis runs on <kbd>a</kbd>, on every
+key or a sample (<kbd>n</kbd>); <kbd>Enter</kbd> looks into a prefix, or shows a big key
+in the keys. In Pub/Sub, <kbd>s</kbd> subscribes to a channel or a pattern,
+<kbd>p</kbd> publishes, and on the Monitor page <kbd>s</kbd> starts and stops MONITOR,
+which stops on its own when you leave the view. Connections are added and edited in the
+desktop app.
 
 ## Layout
 

@@ -6573,6 +6573,7 @@ name = "redcrab-tui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "futures",
  "ratatui",
