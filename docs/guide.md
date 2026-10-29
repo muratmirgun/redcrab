@@ -168,7 +168,8 @@ The new version replaces the app where it is: `redcrab.app` (which needs a folde
 can write to, such as Applications, not the disk image), the `.deb` (through
 `pkexec`, which asks for an administrator's password) or the unpacked tarball or
 zip. When it cannot, the dialog links to the download instead. Builds from source
-never look for updates.
+never look for updates. The Homebrew cask updates itself the same way, so
+`brew upgrade` leaves it alone; Homebrew's `redcrab-tui` updates with `brew upgrade`.
 
 ## Terminal app
 

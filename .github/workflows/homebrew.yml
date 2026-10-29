@@ -1,0 +1,147 @@
+# Points the Homebrew tap (github.com/muratmirgun/homebrew-tap) at a release
+# once it is published: the redcrab cask for the desktop app and the
+# redcrab-tui formula for the terminal app, written by scripts/homebrew.sh.
+# A draft's files cannot be downloaded yet, hence publishing, not the tag.
+#
+# Both are installed from a copy of the updated tap before it is pushed, so a
+# broken one never reaches anyone. Pushes to main that touch them run the same
+# check against the latest release, without pushing.
+#
+# Pushing needs the HOMEBREW_TAP_SSH_KEY secret: a deploy key of the tap with
+# write access (see RELEASING.md).
+name: Homebrew
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - scripts/homebrew.sh
+      - .github/workflows/homebrew.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "A published release, e.g. v0.4.2 (the latest when empty)"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HOMEBREW_NO_ANALYTICS: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+jobs:
+  tap:
+    name: Update the tap
+    if: github.event_name != 'release' || !github.event.release.prerelease
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # The Homebrew people get, not the one the runner image was built with.
+      - name: Update Homebrew
+        run: brew update --quiet
+
+      - name: Download the release's checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          fi
+          echo "TAG=$TAG" >>"$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >>"$GITHUB_ENV"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'SHA256SUMS*' --dir "$RUNNER_TEMP/release"
+
+      # The same check installed copies make before they update.
+      - name: Check their signature
+        run: |
+          openssl="$(brew --prefix openssl@3)/bin/openssl"
+          [ -x "$openssl" ] || brew install openssl@3
+          "$openssl" pkeyutl -verify -rawin -pubin \
+            -inkey crates/redcrab-core/src/update/release-key.pub.pem \
+            -in "$RUNNER_TEMP/release/SHA256SUMS" \
+            -sigfile "$RUNNER_TEMP/release/SHA256SUMS.sig"
+
+      - name: Check out the tap
+        uses: actions/checkout@v7
+        with:
+          repository: muratmirgun/homebrew-tap
+          ref: main
+          path: tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+
+      - name: Write the cask and formula
+        run: |
+          scripts/homebrew.sh "$VERSION" "$RUNNER_TEMP/release/SHA256SUMS" tap
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/redcrab.rb Formula/redcrab-tui.rb
+          if git diff --cached --quiet; then
+            echo "The tap is unchanged."
+          else
+            git commit -q -m "Update redcrab to $TAG"
+            echo "CHANGED=1" >>"$GITHUB_ENV"
+          fi
+          git show --stat HEAD
+
+      # By full name, as the README says: Homebrew then trusts what it was
+      # asked for by name, as it does for anyone installing from the tap.
+      - name: Install them from the updated tap
+        run: |
+          tapped=$(sed -n 's/^  version "\(.*\)"$/\1/p' tap/Casks/redcrab.rb)
+          brew tap muratmirgun/tap "$GITHUB_WORKSPACE/tap"
+          brew style muratmirgun/tap/redcrab-tui
+          brew style --cask muratmirgun/tap/redcrab
+
+          brew install muratmirgun/tap/redcrab-tui
+          brew test muratmirgun/tap/redcrab-tui
+          said=$(redcrab-tui --version)
+          if [ "$said" != "redcrab-tui $tapped" ]; then
+            echo "::error::redcrab-tui says '$said', not 'redcrab-tui $tapped'"
+            exit 1
+          fi
+
+          brew install --cask muratmirgun/tap/redcrab
+          # Not notarized: a person opens it once by hand (the cask's caveats).
+          xattr -dr com.apple.quarantine /Applications/redcrab.app
+          said=$(/Applications/redcrab.app/Contents/MacOS/redcrab --version)
+          if [ "$said" != "redcrab $tapped" ]; then
+            echo "::error::redcrab.app says '$said', not 'redcrab $tapped'"
+            exit 1
+          fi
+
+          brew trust muratmirgun/tap
+          brew audit --strict --online --formula muratmirgun/tap/redcrab-tui
+          brew audit --strict --online --cask muratmirgun/tap/redcrab
+
+      - name: Push the tap
+        if: env.CHANGED == '1' && github.event_name != 'push'
+        working-directory: tap
+        env:
+          TAP_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+        run: |
+          if [ -z "$TAP_KEY" ]; then
+            echo "::error::The HOMEBREW_TAP_SSH_KEY secret is missing, so the tap cannot be updated (see RELEASING.md)."
+            exit 1
+          fi
+          # OwnCode's release pushes to the same tap.
+          git push origin HEAD:main || {
+            git pull --rebase origin main
+            git push origin HEAD:main
+          }

@@ -87,7 +87,14 @@
 
 ## Install
 
-Download the package for your system from the
+With [Homebrew](https://brew.sh), on macOS (the terminal app on Linux too):
+
+```sh
+brew install --cask muratmirgun/tap/redcrab    # the desktop app
+brew install muratmirgun/tap/redcrab-tui       # the terminal app
+```
+
+Or download the package for your system from the
 [latest release](https://github.com/muratmirgun/redcrab/releases/latest):
 
 | System | Package | |
@@ -102,6 +109,7 @@ or anywhere without the desktop, it comes on its own, without the GUI's librarie
 
 | System | Terminal app alone |
 | --- | --- |
+| macOS, Linux with Homebrew | `brew install muratmirgun/tap/redcrab-tui` |
 | macOS | `redcrab-tui-<version>-macos-universal.tar.gz`: put `redcrab-tui` on your `PATH` |
 | Debian, Ubuntu | `redcrab-tui_<version>_amd64.deb` or `_arm64.deb`: `sudo apt install ./redcrab-tui_*.deb` |
 | Other Linux | `redcrab-tui-<version>-linux-<arch>.tar.gz` |
@@ -110,14 +118,17 @@ or anywhere without the desktop, it comes on its own, without the GUI's librarie
 The desktop `.deb` takes the place of `redcrab-tui`'s when both are installed.
 
 From then on redcrab keeps itself up to date: it looks for a new release once a day and
-asks before installing it ([more](docs/guide.md#updates)).
+asks before installing it ([more](docs/guide.md#updates)). Homebrew's `redcrab-tui`
+updates with `brew upgrade`.
 
 <details>
 <summary>The first start, and checking a download</summary>
 
-- **macOS:** the app is not notarized yet, so the first start needs a right-click on
-  redcrab.app, then **Open** (or `xattr -dr com.apple.quarantine /Applications/redcrab.app`).
-  For `redcrab-tui`: `xattr -d com.apple.quarantine redcrab-tui`.
+- **macOS:** the app is not notarized yet, so macOS stops it the first time: open it
+  once, then **Open Anyway** in System Settings > Privacy & Security (on macOS 14 and
+  older, right-click redcrab.app > **Open**), or run
+  `xattr -dr com.apple.quarantine /Applications/redcrab.app`. A downloaded
+  `redcrab-tui` needs `xattr -d com.apple.quarantine redcrab-tui`; Homebrew's does not.
 - **Windows:** the executable is not code-signed yet; SmartScreen may say "Windows
   protected your PC": **More info**, then **Run anyway**.
 - **Linux:** drawing needs a Vulkan driver (`mesa-vulkan-drivers` on most systems). For

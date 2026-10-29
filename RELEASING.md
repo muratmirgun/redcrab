@@ -16,6 +16,9 @@
    file and notes generated from the commits.
 4. Read the draft on GitHub, edit the notes if needed, and publish it. Installed
    copies (0.2.0 and later) offer it within a day; they never see a draft.
+5. Publishing runs [`.github/workflows/homebrew.yml`](.github/workflows/homebrew.yml):
+   it points the [Homebrew tap](#homebrew-tap) at the release, after installing the
+   cask and formula from a copy of it on macOS.
 
 Packaging changes are tried out before a release: pushes to `main` that touch
 `scripts/package/`, the release workflow, `assets/logo/` or the GUI's `build.rs` run the
@@ -46,10 +49,31 @@ signed with the new one and need one manual download. When the old key is still 
 (a planned change), that is avoidable: release once more with the old key as the
 secret and the new public key in the source, then switch the secret.
 
+## Homebrew tap
+
+[muratmirgun/homebrew-tap](https://github.com/muratmirgun/homebrew-tap) holds
+`Casks/redcrab.rb` (the desktop app's disk image) and `Formula/redcrab-tui.rb` (the
+terminal app's tarballs for macOS and Linux), next to OwnCode's formula. The Homebrew
+workflow writes both with [`scripts/homebrew.sh`](scripts/homebrew.sh) from the
+release's signed `SHA256SUMS`, so edit them there; it never takes the tap back to an
+older version. Pushes to `main` that touch the script or the workflow check them against
+the latest release without pushing. To point the tap at a release again, run the
+workflow by hand (Actions > Homebrew > Run workflow) with its tag.
+
+It pushes with a deploy key of the tap, the repository secret `HOMEBREW_TAP_SSH_KEY`.
+To replace it:
+
+```sh
+ssh-keygen -t ed25519 -N "" -C "redcrab release" -f homebrew-tap-key
+```
+
+Add `homebrew-tap-key.pub` to the tap under Settings > Deploy keys with **Allow write
+access**, the contents of `homebrew-tap-key` as the secret here, then delete both files.
+
 ## macOS signing and notarization
 
 Without the secrets below the app is ad-hoc signed: it runs, but a downloaded copy needs
-a right-click > **Open** the first time. With an Apple Developer account (Developer ID),
+**Open Anyway** in System Settings > Privacy & Security the first time. With an Apple Developer account (Developer ID),
 add these repository secrets (Settings > Secrets and variables > Actions) and the next
 release is signed with the hardened runtime, notarized and stapled:
 
