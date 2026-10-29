@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Builds the Linux packages for this machine's architecture, each with the
-# desktop app and the terminal app (redcrab-tui):
-#   dist/redcrab-<version>-linux-<arch>.tar.gz   binaries, .desktop file, icons
-#   dist/redcrab_<version>_<debarch>.deb         for Debian and Ubuntu
+# Builds the Linux packages for this machine's architecture: the desktop
+# app with the terminal app (redcrab-tui), and the terminal app alone, for
+# servers, which then need none of the GUI's libraries:
+#   dist/redcrab-<version>-linux-<arch>.tar.gz       binaries, .desktop file, icons
+#   dist/redcrab_<version>_<debarch>.deb             for Debian and Ubuntu
+#   dist/redcrab-tui-<version>-linux-<arch>.tar.gz   redcrab-tui alone
+#   dist/redcrab-tui_<version>_<debarch>.deb         redcrab-tui alone
 #
 # Build on the oldest distribution the packages should run on: the binary
 # needs at least the glibc it was linked against (the release workflow uses
@@ -65,10 +68,12 @@ install -D -m 755 "$tui" "$root/usr/bin/redcrab-tui"
 install -D -m 644 "$desktop" "$root/usr/share/applications/redcrab.desktop"
 mkdir -p "$root/usr/share/icons"
 cp -R "$icons/hicolor" "$root/usr/share/icons/"
-doc="$root/usr/share/doc/redcrab"
-mkdir -p "$doc"
-{
-    cat <<'EOF'
+# The machine-readable copyright file of the .deb named $1, in its root $2.
+deb_copyright() {
+    local doc="$2/usr/share/doc/$1"
+    mkdir -p "$doc"
+    {
+        cat <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: redcrab
 Source: https://github.com/muratmirgun/redcrab
@@ -79,20 +84,27 @@ License: MIT or Apache-2.0
 
 License: MIT
 EOF
-    sed -e 's/^$/./' -e 's/^/ /' LICENSE-MIT
-    printf '\nLicense: Apache-2.0\n'
-    sed -e 's/^$/./' -e 's/^/ /' LICENSE-APACHE
-} >"$doc/copyright"
-find "$root" -type d -exec chmod 755 {} +
+        sed -e 's/^$/./' -e 's/^/ /' LICENSE-MIT
+        printf '\nLicense: Apache-2.0\n'
+        sed -e 's/^$/./' -e 's/^/ /' LICENSE-APACHE
+    } >"$doc/copyright"
+    find "$2" -type d -exec chmod 755 {} +
+}
 
-# Libraries the binary links against, as dpkg-shlibdeps derives them, plus
-# the ones GPUI opens at runtime with dlopen: Vulkan to draw, fontconfig to
-# find fonts, and Wayland on Wayland sessions (X11 works without it).
-mkdir -p "$WORK/shlibs/debian"
-printf 'Source: redcrab\n\nPackage: redcrab\nArchitecture: any\n' >"$WORK/shlibs/debian/control"
-depends=$(cd "$WORK/shlibs" && dpkg-shlibdeps -O "$root/usr/bin/redcrab" "$root/usr/bin/redcrab-tui" |
-    sed -n 's/^shlibs:Depends=//p')
-depends="$depends, libvulkan1, libfontconfig1"
+# The libraries the given binaries link against, as dpkg-shlibdeps derives
+# them, for a Depends field.
+shlib_depends() {
+    local dir="$WORK/shlibs"
+    mkdir -p "$dir/debian"
+    printf 'Source: redcrab\n\nPackage: redcrab\nArchitecture: any\n' >"$dir/debian/control"
+    (cd "$dir" && dpkg-shlibdeps -O "$@" | sed -n 's/^shlibs:Depends=//p')
+}
+
+deb_copyright redcrab "$root"
+# Plus the libraries GPUI opens at runtime with dlopen: Vulkan to draw,
+# fontconfig to find fonts, and Wayland on Wayland sessions (X11 works
+# without it).
+depends="$(shlib_depends "$root/usr/bin/redcrab" "$root/usr/bin/redcrab-tui"), libvulkan1, libfontconfig1"
 installed_kb=$(du -sk "$root/usr" | cut -f1)
 
 mkdir -p "$root/DEBIAN"
@@ -106,6 +118,9 @@ Maintainer: Murat Mirgün Ercan <muratmirgunercan225@gmail.com>
 Installed-Size: $installed_kb
 Depends: $depends
 Recommends: libwayland-client0, mesa-vulkan-drivers
+Provides: redcrab-tui
+Conflicts: redcrab-tui
+Replaces: redcrab-tui
 Homepage: https://github.com/muratmirgun/redcrab
 Description: fast, native Redis GUI
  redcrab is a GPU-rendered client for Redis and Valkey that stays responsive
@@ -118,6 +133,44 @@ deb="$DIST/redcrab_${VERSION}_${deb_arch}.deb"
 dpkg-deb --root-owner-group --build "$root" "$deb" >&2
 dpkg-deb --info "$deb" >&2
 
-checksum "$tarball" "$deb"
+# --- the terminal app alone: what a server needs, none of the GUI's
+# libraries. The desktop .deb holds redcrab-tui too, so it takes this one's
+# place (Provides, Conflicts, Replaces above).
+tui_name="redcrab-tui-$VERSION-linux-$arch"
+tui_tree="$WORK/$tui_name"
+mkdir -p "$tui_tree"
+install -m 755 "$tui" "$tui_tree/redcrab-tui"
+install -m 644 LICENSE-MIT LICENSE-APACHE README.md "$tui_tree/"
+tui_tarball="$DIST/$tui_name.tar.gz"
+tar -C "$WORK" -czf "$tui_tarball" "$tui_name"
+
+tui_root="$WORK/tui-deb"
+install -D -m 755 "$tui" "$tui_root/usr/bin/redcrab-tui"
+deb_copyright redcrab-tui "$tui_root"
+tui_depends=$(shlib_depends "$tui_root/usr/bin/redcrab-tui")
+mkdir -p "$tui_root/DEBIAN"
+cat >"$tui_root/DEBIAN/control" <<EOF
+Package: redcrab-tui
+Version: $VERSION
+Section: database
+Priority: optional
+Architecture: $deb_arch
+Maintainer: Murat Mirgün Ercan <muratmirgunercan225@gmail.com>
+Installed-Size: $(du -sk "$tui_root/usr" | cut -f1)
+Depends: $tui_depends
+Homepage: https://github.com/muratmirgun/redcrab
+Description: fast Redis and Valkey client for the terminal
+ redcrab-tui browses keys as a tree, edits values of every type, runs
+ commands in a console, and shows the server's figures, a memory analysis
+ and Pub/Sub, in a terminal: for a server reached over SSH or a machine
+ without a GPU. It reads the connections saved by the redcrab desktop app.
+EOF
+tui_deb="$DIST/redcrab-tui_${VERSION}_${deb_arch}.deb"
+dpkg-deb --root-owner-group --build "$tui_root" "$tui_deb" >&2
+dpkg-deb --info "$tui_deb" >&2
+
+checksum "$tarball" "$deb" "$tui_tarball" "$tui_deb"
 echo "$tarball"
 echo "$deb"
+echo "$tui_tarball"
+echo "$tui_deb"

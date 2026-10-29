@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Builds dist/redcrab-<version>-windows-<arch>.zip: redcrab.exe (icon and
-# version information embedded by crates/redcrab-gui/build.rs) and the
-# terminal app, redcrab-tui.exe, with the licenses. Runs in Git Bash on Windows (the release workflow's shell).
-# The executable is not code-signed, so SmartScreen may warn on first start.
+# Builds, with the licenses:
+#   dist/redcrab-<version>-windows-<arch>.zip       redcrab.exe (icon and version
+#       information embedded by crates/redcrab-gui/build.rs) and the terminal
+#       app, redcrab-tui.exe
+#   dist/redcrab-tui-<version>-windows-<arch>.zip   redcrab-tui.exe alone
+# Runs in Git Bash on Windows (the release workflow's shell). The executables
+# are not code-signed, so SmartScreen may warn on first start.
 
 source "$(dirname "$0")/common.sh"
 
@@ -21,16 +24,20 @@ answers_version "$tui" redcrab-tui
 # given, as the updater needs.
 answers_version "$exe"
 
-name="redcrab-$VERSION-windows-$arch"
-folder="$WORK/$name"
-mkdir -p "$folder"
-cp "$exe" "$tui" LICENSE-MIT LICENSE-APACHE README.md "$folder/"
+# Zips the folder $1 with the given files into dist/$1.zip, and prints its
+# path.
+package() {
+    local folder="$WORK/$1" zip="$DIST/$1.zip"
+    shift
+    mkdir -p "$folder"
+    cp "$@" LICENSE-MIT LICENSE-APACHE README.md "$folder/"
+    rm -f "$zip"
+    # Compress-Archive ships with every Windows; zip(1) does not.
+    powershell.exe -NoProfile -NonInteractive -Command \
+        "Compress-Archive -Path '$(cygpath -w "$folder")' -DestinationPath '$(cygpath -w "$zip")'"
+    checksum "$zip"
+    echo "$zip"
+}
 
-zip="$DIST/$name.zip"
-rm -f "$zip"
-# Compress-Archive ships with every Windows; zip(1) does not.
-powershell.exe -NoProfile -NonInteractive -Command \
-    "Compress-Archive -Path '$(cygpath -w "$folder")' -DestinationPath '$(cygpath -w "$zip")'"
-
-checksum "$zip"
-echo "$zip"
+package "redcrab-$VERSION-windows-$arch" "$exe" "$tui"
+package "redcrab-tui-$VERSION-windows-$arch" "$tui"

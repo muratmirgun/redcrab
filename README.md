@@ -97,9 +97,17 @@ Download the package for your system from the
 | Other Linux with glibc 2.35+ | `redcrab-<version>-linux-<arch>.tar.gz` | Unpack, run `./redcrab` |
 | Windows 10 and 11, x86_64 | `redcrab-<version>-windows-x86_64.zip` | Unzip, run `redcrab.exe` |
 
-The Linux and Windows packages hold the [terminal app](#terminal-app) too. On macOS it
-is a download of its own, `redcrab-tui-<version>-macos-universal.tar.gz`: put
-`redcrab-tui` in a folder on your `PATH`.
+The Linux and Windows packages hold the [terminal app](#terminal-app) too. For a server,
+or anywhere without the desktop, it comes on its own, without the GUI's libraries:
+
+| System | Terminal app alone |
+| --- | --- |
+| macOS | `redcrab-tui-<version>-macos-universal.tar.gz`: put `redcrab-tui` on your `PATH` |
+| Debian, Ubuntu | `redcrab-tui_<version>_amd64.deb` or `_arm64.deb`: `sudo apt install ./redcrab-tui_*.deb` |
+| Other Linux | `redcrab-tui-<version>-linux-<arch>.tar.gz` |
+| Windows | `redcrab-tui-<version>-windows-x86_64.zip` |
+
+The desktop `.deb` takes the place of `redcrab-tui`'s when both are installed.
 
 From then on redcrab keeps itself up to date: it looks for a new release once a day and
 asks before installing it ([more](docs/guide.md#updates)).

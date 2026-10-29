@@ -11,8 +11,9 @@
 
 3. [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the macOS
    universal `.dmg`, the Linux `.tar.gz` and `.deb` for x86_64 and aarch64, and the
-   Windows `.zip`, checks that each one starts, and creates a **draft** release with the
-   files, a `SHA256SUMS` file and notes generated from the commits.
+   Windows `.zip`, and the terminal app on its own for each (`redcrab-tui-*`), checks
+   that each one starts, and creates a **draft** release with the files, a `SHA256SUMS`
+   file and notes generated from the commits.
 4. Read the draft on GitHub, edit the notes if needed, and publish it. Installed
    copies (0.2.0 and later) offer it within a day; they never see a draft.
 

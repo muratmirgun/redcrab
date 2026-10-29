@@ -138,12 +138,30 @@ jobs:
       - name: Package
         run: scripts/package/linux.sh
 
-      # The .deb must install with its declared dependencies and run.
-      - name: Install the .deb
+      # Each .deb must install with its declared dependencies and run: the
+      # terminal app's alone, then the desktop app's, which takes its place.
+      - name: Install the .debs
         run: |
+          sudo apt-get install -y ./dist/redcrab-tui_*.deb
+          redcrab-tui --version
           sudo apt-get install -y ./dist/redcrab_*.deb
           redcrab --version
           redcrab-tui --version
+          if dpkg-query -W -f '${Status}' redcrab-tui 2>/dev/null | grep -q installed; then
+            echo "::error::the desktop .deb did not take redcrab-tui's place"
+            exit 1
+          fi
+
+      # The terminal app alone is for servers: no GUI library may be needed.
+      - name: Check the terminal app's tarball
+        run: |
+          tar -xzf dist/redcrab-tui-*-linux-*.tar.gz -C "$RUNNER_TEMP"
+          tui=$(echo "$RUNNER_TEMP"/redcrab-tui-*/redcrab-tui)
+          "$tui" --version
+          if ldd "$tui" | grep -E 'xcb|xkbcommon|wayland|vulkan|fontconfig|freetype|libX'; then
+            echo "::error::redcrab-tui links against GUI libraries"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -172,10 +190,12 @@ jobs:
 
       # The zip must hold the executable with its resources compiled in: the
       # version block below comes from the same resource script as the icon.
-      - name: Check the package
+      # The terminal app's own zip holds it alone.
+      - name: Check the packages
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          $zip = Get-ChildItem dist/redcrab-[0-9]*.zip | Select-Object -First 1
+          if (-not $zip) { throw "the redcrab zip is missing" }
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP/check"
           $exe = Get-ChildItem "$env:RUNNER_TEMP/check" -Recurse -Filter redcrab.exe | Select-Object -First 1
           if (-not $exe) { throw "redcrab.exe is missing from $($zip.Name)" }
@@ -185,6 +205,17 @@ jobs:
           $info = $exe.VersionInfo
           "$($info.ProductName) $($info.ProductVersion): $($info.FileDescription)"
           if ($info.ProductName -ne "redcrab") { throw "version resource missing" }
+
+          $tuiZip = Get-ChildItem dist/redcrab-tui-*.zip | Select-Object -First 1
+          if (-not $tuiZip) { throw "the redcrab-tui zip is missing" }
+          Expand-Archive $tuiZip.FullName -DestinationPath "$env:RUNNER_TEMP/check-tui"
+          $tui = Get-ChildItem "$env:RUNNER_TEMP/check-tui" -Recurse -Filter redcrab-tui.exe | Select-Object -First 1
+          if (-not $tui) { throw "redcrab-tui.exe is missing from $($tuiZip.Name)" }
+          if (Get-ChildItem "$env:RUNNER_TEMP/check-tui" -Recurse -Filter redcrab.exe) {
+            throw "$($tuiZip.Name) holds the desktop app too"
+          }
+          & $tui.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "redcrab-tui.exe did not start" }
 
       - uses: actions/upload-artifact@v7
         with:
