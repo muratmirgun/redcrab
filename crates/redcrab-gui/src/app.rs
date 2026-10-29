@@ -84,6 +84,15 @@ pub struct RedcrabApp {
 }
 
 impl RedcrabApp {
+    /// The workspace, once connected.
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    pub fn workspace(&self) -> Option<Entity<Workspace>> {
+        match &self.screen {
+            Screen::Workspace(workspace) => Some(workspace.clone()),
+            Screen::Connect(_) => None,
+        }
+    }
+
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (screen, subscription) = Self::connect_screen(start, window, cx);
         let focus = cx.focus_handle();
@@ -193,7 +202,7 @@ impl RedcrabApp {
                     }
                     let keys = db
                         .keys
-                        .map(|keys| format!(" ({} keys)", format::count(keys)))
+                        .map(|keys| format!(" ({})", format::counted(keys, "key", "keys")))
                         .unwrap_or_default();
                     let target = workspace.downgrade();
                     commands.push(

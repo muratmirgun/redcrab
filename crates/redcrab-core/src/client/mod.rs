@@ -159,12 +159,16 @@ impl ServerInfo {
             self.server_label(),
             partial,
             self.db_size
-                .map(|n| format!("{at_least}{} keys", crate::format::count(n))),
+                .map(|n| format!("{at_least}{}", crate::format::counted(n, "key", "keys"))),
             self.used_memory_human
                 .as_ref()
                 .map(|m| format!("{at_least}{m} used")),
-            self.connected_clients
-                .map(|n| format!("{at_least}{n} clients")),
+            self.connected_clients.map(|n| {
+                format!(
+                    "{at_least}{}",
+                    crate::format::counted(n, "client", "clients")
+                )
+            }),
         ]
         .into_iter()
         .flatten()

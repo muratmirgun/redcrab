@@ -392,8 +392,11 @@ impl ConnectView {
                             info.server_label(),
                             info.db_size.map(|n| match info.partial() {
                                 // Part of a cluster did not answer.
-                                Some(why) => format!("at least {} keys ({why})", format::count(n)),
-                                None => format!("{} keys", format::count(n)),
+                                Some(why) => format!(
+                                    "at least {} ({why})",
+                                    format::counted(n, "key", "keys")
+                                ),
+                                None => format::counted(n, "key", "keys"),
                             }),
                             Some(format!("{:.1} ms", latency.as_secs_f64() * 1000.0)),
                         ]

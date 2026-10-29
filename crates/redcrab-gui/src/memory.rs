@@ -270,9 +270,9 @@ impl MemoryView {
                     format::size(analysis.without_ttl.scaled(every).bytes)
                 ),
                 format!(
-                    "{:.0}% of the memory, {} keys",
+                    "{:.0}% of the memory, {}",
                     share(analysis.without_ttl) * 100.,
-                    format::count(analysis.without_ttl.scaled(every).keys)
+                    format::counted(analysis.without_ttl.scaled(every).keys, "key", "keys")
                 ),
                 &theme,
             ));
@@ -455,11 +455,10 @@ fn bar_row(
                 .gap_2()
                 .text_sm()
                 .child(div().flex_1().min_w_0().overflow_hidden().child(label))
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(format!("{estimate}{} keys", format::count(totals.keys))),
-                )
+                .child(div().text_color(theme.muted_foreground).child(format!(
+                    "{estimate}{}",
+                    format::counted(totals.keys, "key", "keys")
+                )))
                 .child(
                     div()
                         .w(px(90.))

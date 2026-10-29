@@ -17,6 +17,10 @@ default = ["runtime-shaders"]
 # once it no longer does, release builds made with full Xcode can turn it off
 # to precompile the shaders.
 runtime-shaders = ["dep:gpui-pre-apple", "gpui-pre-apple/runtime_shaders"]
+# `redcrab --screenshots <dir> <url>` renders the README's screenshots in
+# windows off the screen, with GPUI's visual test platform (macOS only; see
+# scripts/screenshots.sh). Never in a package.
+screenshots = ["dep:gpui", "dep:gpui-pre-macos", "dep:image"]
 
 [dependencies]
 redcrab-core.workspace = true
@@ -31,6 +35,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", optional = true }
+gpui = { package = "gpui-pre", version = "=0.3.10", optional = true, features = ["test-support"] }
+gpui-pre-macos = { version = "=0.3.10", optional = true, features = ["test-support"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # GPUI's headless test platform, for the UI tests (update.rs). gpui-kit's

@@ -15,6 +15,8 @@ mod list;
 mod memory;
 mod popup;
 mod pubsub;
+#[cfg(test)]
+mod screenshots;
 mod server;
 #[cfg(test)]
 mod tests;

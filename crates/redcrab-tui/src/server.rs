@@ -751,8 +751,8 @@ impl ServerView {
                 ));
                 spans.push(Span::styled(
                     format!(
-                        "{} keys · {} with TTL   ",
-                        format::count(db.keys),
+                        "{} · {} with TTL   ",
+                        format::counted(db.keys, "key", "keys"),
                         format::count(db.expires)
                     ),
                     theme::muted(),
@@ -830,7 +830,7 @@ impl ServerView {
             rows,
             &widths,
             first,
-            &self.cursor,
+            Some(&self.cursor),
             focused,
         );
     }
@@ -956,7 +956,7 @@ impl ServerView {
             rows,
             &widths,
             first,
-            &self.cursor,
+            Some(&self.cursor),
             focused,
         );
     }
@@ -1010,7 +1010,7 @@ impl ServerView {
             lines,
             &[Constraint::Length(34), Constraint::Fill(1)],
             first,
-            &self.cursor,
+            Some(&self.cursor),
             focused,
         );
     }

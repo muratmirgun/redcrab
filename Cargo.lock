@@ -6560,6 +6560,8 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-apple",
+ "gpui-pre-macos",
+ "image",
  "redcrab-core",
  "resvg 0.46.0",
  "serde_json",

@@ -241,7 +241,7 @@ impl Workspace {
 
     /// Shows `key` in the keys view: selected in the tree (added to it if
     /// the filter left it out) and its value loaded.
-    fn open_key(&mut self, key: Key, ctx: &mut Ctx) {
+    pub fn open_key(&mut self, key: Key, ctx: &mut Ctx) {
         self.show(View::Keys, ctx);
         self.keys.add_key(&key, ctx);
         self.value.load(key, ctx);

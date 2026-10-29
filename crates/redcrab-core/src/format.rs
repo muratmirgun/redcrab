@@ -101,6 +101,11 @@ pub fn count(n: u64) -> String {
     out
 }
 
+/// A count and what it counts, one or many: `1 key`, `1,234 keys`.
+pub fn counted(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", count(n), if n == 1 { one } else { many })
+}
+
 /// Renders a reply the way `redis-cli` prints it.
 pub fn reply(v: &Value) -> String {
     let mut out = String::new();
@@ -418,6 +423,9 @@ mod tests {
     #[test]
     fn formats_numbers() {
         assert_eq!(count(1234567), "1,234,567");
+        assert_eq!(counted(1, "key", "keys"), "1 key");
+        assert_eq!(counted(0, "key", "keys"), "0 keys");
+        assert_eq!(counted(1500, "key", "keys"), "1,500 keys");
         assert_eq!(size(1536), "1.5 KB");
         assert_eq!(ttl(-1), None);
         assert_eq!(ttl(3_725_000).unwrap(), "1h 2m");

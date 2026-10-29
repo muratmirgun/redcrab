@@ -92,8 +92,9 @@ impl KeysPane {
         }
     }
 
-    /// Asks for the type and TTL of the keys on screen that have none yet.
-    fn request_meta(&mut self, ctx: &mut Ctx) {
+    /// Asks for the type and TTL of the keys on screen that have none yet
+    /// (and are not asked for already).
+    fn request_meta(&mut self, ctx: &Ctx) {
         let range = self.offset..self.offset + self.height;
         let Some(request) = self.model.take_meta_request(range) else {
             return;
@@ -309,6 +310,9 @@ impl KeysPane {
         if let Some(ix) = self.model.selected_index() {
             self.scroll_to(ix);
         }
+        // Rows a smaller pane (the console opening) or a taller one
+        // brought on screen.
+        self.request_meta(ctx);
         let len = self.model.len();
         if len == 0 {
             let empty = match self.model.status() {

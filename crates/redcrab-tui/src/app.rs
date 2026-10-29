@@ -411,12 +411,17 @@ impl App {
         }
     }
 
-    /// The screen drawn at `width` by `height`, as text.
-    pub fn screen_text(&mut self, width: u16, height: u16) -> String {
+    /// The screen drawn at `width` by `height`.
+    pub fn render(&mut self, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| self.draw(frame)).unwrap();
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The screen drawn at `width` by `height`, as text.
+    pub fn screen_text(&mut self, width: u16, height: u16) -> String {
+        let buffer = self.render(width, height);
         (0..height)
             .map(|y| {
                 (0..width)

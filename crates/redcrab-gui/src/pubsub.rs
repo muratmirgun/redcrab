@@ -39,6 +39,8 @@ use redcrab_core::{
 const ROW_HEIGHT: f32 = 26.;
 /// How often a feed redraws while entries arrive.
 const REDRAW_EVERY: Duration = Duration::from_millis(100);
+/// How long a closed Pub/Sub connection's channels may still be listed.
+const UNSUBSCRIBED_AFTER: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -198,8 +200,9 @@ impl PubSubView {
 
     /// Subscribes, opening the connection first if there is none. While
     /// it opens, more channels can be asked for: it subscribes to all of
-    /// them once open.
-    fn subscribe(&mut self, channel: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
+    /// them once open. The channels with subscribers are listed again
+    /// after, this one among them.
+    pub fn subscribe(&mut self, channel: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
         if self.subscribed.contains(&channel) {
             return;
         }
@@ -208,12 +211,14 @@ impl PubSubView {
         if let Some(subscriber) = &self.subscriber {
             let request = subscriber.subscribe(channel.clone());
             cx.spawn_in(window, async move |this, cx| {
-                if let Err(err) = request.await {
-                    this.update_in(cx, |this, window, cx| {
+                let result = request.await;
+                this.update_in(cx, |this, window, cx| {
+                    if let Err(err) = result {
                         this.failed_to_subscribe(&[channel], &format!("{err:#}"), window, cx);
-                    })
-                    .ok();
-                }
+                    }
+                    this.load_channels(cx);
+                })
+                .ok();
             })
             .detach();
             return;
@@ -258,6 +263,7 @@ impl PubSubView {
                     .ok();
                 }
             }
+            this.update(cx, |this, cx| this.load_channels(cx)).ok();
         })
         .detach();
     }
@@ -303,22 +309,33 @@ impl PubSubView {
         cx.notify();
     }
 
+    /// Unsubscribes, then lists the channels with subscribers again.
     fn unsubscribe(&mut self, channel: Vec<u8>, cx: &mut Context<Self>) {
         self.subscribed.retain(|c| *c != channel);
-        if self.subscribed.is_empty() {
+        let request = if self.subscribed.is_empty() {
             // Nothing left to hear: the connection goes, the messages stay.
             self.subscriber = None;
             self._listen = None;
-        } else if let Some(subscriber) = &self.subscriber {
-            let request = subscriber.unsubscribe(channel);
-            cx.background_executor()
-                .spawn(async move {
+            None
+        } else {
+            self.subscriber
+                .as_ref()
+                .map(|subscriber| subscriber.unsubscribe(channel))
+        };
+        cx.spawn(async move |this, cx| {
+            match request {
+                Some(request) => {
                     if let Err(err) = request.await {
                         tracing::warn!("unsubscribe failed: {err:#}");
                     }
-                })
-                .detach();
-        }
+                }
+                // The server lets go of a closed connection's channels
+                // soon after.
+                None => cx.background_executor().timer(UNSUBSCRIBED_AFTER).await,
+            }
+            this.update(cx, |this, cx| this.load_channels(cx)).ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -913,9 +930,12 @@ impl Render for PubSubView {
     }
 }
 
+/// A row of a feed: as wide as the list (uniform_list lays a row out at
+/// its content's width otherwise).
 fn row(ix: usize, cx: &gpui_kit::App) -> gpui_kit::Stateful<gpui_kit::Div> {
     h_flex()
         .id(ix)
+        .w_full()
         .h(px(ROW_HEIGHT))
         .px_3()
         .gap_2()

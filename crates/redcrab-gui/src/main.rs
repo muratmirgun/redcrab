@@ -14,6 +14,8 @@ mod keys;
 mod memory;
 mod palette;
 mod pubsub;
+#[cfg(all(feature = "screenshots", target_os = "macos"))]
+mod screenshots;
 mod server;
 mod settings;
 mod shortcuts;
@@ -72,6 +74,16 @@ fn main() {
         return;
     }
 
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    if let Some("--screenshots") = arg.as_deref() {
+        let mut args = std::env::args().skip(2);
+        let (Some(out), Some(url)) = (args.next(), args.next()) else {
+            eprintln!("usage: redcrab --screenshots <dir> <redis url>");
+            std::process::exit(2);
+        };
+        return screenshots::run(out.into(), &url);
+    }
+
     // `redcrab redis://user:pass@host:port/db` connects right away.
     let start = match arg.map(|url| ConnectionConfig::parse_url(&url)) {
         Some(Ok(config)) => Start::Connect(config),
@@ -85,40 +97,46 @@ fn main() {
     gpui_kit::application()
         .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
-            gpui_kit::init(cx);
-            // The saved theme and text size, before the first window draws.
-            settings::init(cx);
-
-            // ⌘ on macOS, Ctrl elsewhere (see `shortcuts`).
-            cx.bind_keys(shortcuts::bindings());
-            cx.bind_keys([
-                KeyBinding::new("up", SelectPrev, Some("KeyList")),
-                KeyBinding::new("down", SelectNext, Some("KeyList")),
-                KeyBinding::new("right", Expand, Some("KeyList")),
-                KeyBinding::new("left", Collapse, Some("KeyList")),
-                // Reaches the console once its input has nothing to dismiss.
-                KeyBinding::new("escape", StopCommand, Some("Console")),
-            ]);
-            // After `gpui_kit::init`, which binds the input's own keys.
-            cx.bind_keys(console::key_bindings());
-            cx.on_action(|_: &Quit, cx| cx.quit());
-            cx.on_action(|_: &NewWindow, cx| open_main_window(Start::Fresh, cx));
-            // Handled for the whole app, so that they work wherever focus
-            // is, even nowhere: in the window in front.
-            cx.on_action(|_: &OpenPalette, cx| app::open_palette(cx));
-            cx.on_action(|_: &OpenSettings, cx| settings::open_in_active_window(cx));
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-
-            // Before the first window, whose title bar shows the updates.
-            update::init(cx);
+            setup(cx);
             open_main_window(start, cx);
             cx.activate(true);
         });
+}
+
+/// Everything the app needs before its first window: the theme, the keys,
+/// the app-wide actions and the updater.
+pub(crate) fn setup(cx: &mut App) {
+    gpui_kit::init(cx);
+    // The saved theme and text size, before the first window draws.
+    settings::init(cx);
+
+    // ⌘ on macOS, Ctrl elsewhere (see `shortcuts`).
+    cx.bind_keys(shortcuts::bindings());
+    cx.bind_keys([
+        KeyBinding::new("up", SelectPrev, Some("KeyList")),
+        KeyBinding::new("down", SelectNext, Some("KeyList")),
+        KeyBinding::new("right", Expand, Some("KeyList")),
+        KeyBinding::new("left", Collapse, Some("KeyList")),
+        // Reaches the console once its input has nothing to dismiss.
+        KeyBinding::new("escape", StopCommand, Some("Console")),
+    ]);
+    // After `gpui_kit::init`, which binds the input's own keys.
+    cx.bind_keys(console::key_bindings());
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &NewWindow, cx| open_main_window(Start::Fresh, cx));
+    // Handled for the whole app, so that they work wherever focus is, even
+    // nowhere: in the window in front.
+    cx.on_action(|_: &OpenPalette, cx| app::open_palette(cx));
+    cx.on_action(|_: &OpenSettings, cx| settings::open_in_active_window(cx));
+    cx.on_window_closed(|cx, _| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
+
+    // Before the first window, whose title bar shows the updates.
+    update::init(cx);
 }
 
 /// Every window starts at the connection screen and holds one connection.

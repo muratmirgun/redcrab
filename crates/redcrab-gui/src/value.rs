@@ -1394,6 +1394,7 @@ impl ValuePanel {
                 let selected = self.picked.contains(&ix);
                 h_flex()
                     .id(ix)
+                    .w_full()
                     .h(px(ROW_HEIGHT))
                     .px_3()
                     .gap_3()

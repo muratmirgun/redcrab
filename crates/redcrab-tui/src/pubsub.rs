@@ -34,6 +34,8 @@ use crate::{
 
 /// How often a feed redraws while entries arrive.
 const REDRAW_EVERY: Duration = Duration::from_millis(100);
+/// How long a closed Pub/Sub connection's channels may still be listed.
+const UNSUBSCRIBED_AFTER: Duration = Duration::from_millis(200);
 
 pub const HELP: &[(&str, &str)] = &[
     ("", "Pub/Sub"),
@@ -295,7 +297,8 @@ impl PubSubView {
         );
     }
 
-    /// Takes back a subscription the server refused.
+    /// Takes back a subscription the server refused, and lists the
+    /// channels with subscribers again.
     fn on_subscribed(
         &self,
         request: impl Future<Output = anyhow::Result<()>> + Send + 'static,
@@ -304,11 +307,13 @@ impl PubSubView {
     ) -> Task {
         let id = self.workspace;
         ctx.jobs.spawn(request, move |app, result| {
-            if let Err(err) = result
-                && let Some((this, ctx)) = view(app, id)
-            {
+            let Some((this, ctx)) = view(app, id) else {
+                return;
+            };
+            if let Err(err) = result {
                 this.failed_to_subscribe(&[channel], &format!("{err:#}"), ctx);
             }
+            this.load_channels(ctx);
         })
     }
 
@@ -334,21 +339,40 @@ impl PubSubView {
         ctx.notify(Tone::Error, format!("Could not subscribe: {error}"));
     }
 
+    /// Unsubscribes, then lists the channels with subscribers again.
     fn unsubscribe(&mut self, channel: Vec<u8>, ctx: &mut Ctx) {
         self.subscribed.retain(|c| *c != channel);
-        if self.subscribed.is_empty() {
+        let request = if self.subscribed.is_empty() {
             // Nothing left to hear: the connection goes, the messages stay.
             self.subscriber = None;
             self._listen = None;
-        } else if let Some(subscriber) = &self.subscriber {
-            let request = subscriber.unsubscribe(channel);
-            let task = ctx.jobs.spawn(request, |_, result| {
-                if let Err(err) = result {
-                    tracing::warn!("unsubscribe failed: {err:#}");
+            None
+        } else {
+            self.subscriber
+                .as_ref()
+                .map(|subscriber| subscriber.unsubscribe(channel))
+        };
+        let done = async move {
+            match request {
+                Some(request) => request.await,
+                // The server lets go of a closed connection's channels soon
+                // after.
+                None => {
+                    tokio::time::sleep(UNSUBSCRIBED_AFTER).await;
+                    Ok(())
                 }
-            });
-            self.keep(task);
-        }
+            }
+        };
+        let id = self.workspace;
+        let task = ctx.jobs.spawn(done, move |app, result| {
+            if let Err(err) = result {
+                tracing::warn!("unsubscribe failed: {err:#}");
+            }
+            if let Some((this, ctx)) = view(app, id) {
+                this.load_channels(ctx);
+            }
+        });
+        self.keep(task);
     }
 
     fn start_monitor(&mut self, ctx: &mut Ctx) {
@@ -757,7 +781,7 @@ impl PubSubView {
             rows,
             &[Constraint::Fill(1), Constraint::Length(7)],
             first,
-            &self.side,
+            Some(&self.side),
             side_focused,
         );
 
@@ -859,7 +883,7 @@ impl PubSubView {
                 Constraint::Fill(1),
             ],
             first,
-            &self.message_view.cursor,
+            Some(&self.message_view.cursor),
             feed_focused,
         );
     }
@@ -966,7 +990,7 @@ impl PubSubView {
                 Constraint::Fill(1),
             ],
             first,
-            &self.monitor_view.cursor,
+            Some(&self.monitor_view.cursor),
             focused,
         );
     }

@@ -335,7 +335,7 @@ impl MemoryView {
                 Constraint::Fill(1),
             ],
             0,
-            &Cursor::default(),
+            None,
             false,
         );
 
@@ -411,7 +411,7 @@ impl MemoryView {
                     Constraint::Length(8),
                 ],
                 first,
-                &self.prefixes,
+                Some(&self.prefixes),
                 prefixes_focused,
             );
         }
@@ -451,7 +451,7 @@ impl MemoryView {
                 Constraint::Length(10),
             ],
             first,
-            &self.biggest,
+            Some(&self.biggest),
             biggest_focused,
         );
     }

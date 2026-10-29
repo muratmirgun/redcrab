@@ -77,7 +77,7 @@ impl Cursor {
 }
 
 /// Draws `rows`, the [`Cursor::window`] starting at `first`, under
-/// `header` if any, the selected one highlighted.
+/// `header` if any, the selected one highlighted (none without a cursor).
 #[allow(clippy::too_many_arguments)]
 pub fn table(
     frame: &mut Frame,
@@ -86,10 +86,11 @@ pub fn table(
     rows: Vec<Row<'_>>,
     widths: &[Constraint],
     first: usize,
-    cursor: &Cursor,
+    cursor: Option<&Cursor>,
     focused: bool,
 ) {
-    let mut state = TableState::default().with_selected(cursor.selected.checked_sub(first));
+    let selected = cursor.and_then(|cursor| cursor.selected.checked_sub(first));
+    let mut state = TableState::default().with_selected(selected);
     let mut table = Table::new(rows, widths.iter().copied())
         .column_spacing(2)
         .row_highlight_style(theme::selected(focused));

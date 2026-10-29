@@ -164,6 +164,29 @@ impl Workspace {
         }
     }
 
+    /// Shows or hides the console.
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    pub fn set_console(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_console != show {
+            self.toggle_console(&ToggleConsole, window, cx);
+        }
+    }
+
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    pub fn close_folders(&mut self, cx: &mut Context<Self>) {
+        self.keys.update(cx, |keys, cx| keys.close_folders(cx));
+    }
+
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    pub fn memory(&self) -> Option<Entity<MemoryView>> {
+        self.memory.clone()
+    }
+
+    #[cfg(all(feature = "screenshots", target_os = "macos"))]
+    pub fn pubsub(&self) -> Option<Entity<PubSubView>> {
+        self.pubsub.clone()
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }

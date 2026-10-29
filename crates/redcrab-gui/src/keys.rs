@@ -636,6 +636,11 @@ impl KeyBrowser {
     }
 
     fn collapse_all(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.close_folders(cx);
+    }
+
+    /// Closes every folder.
+    pub fn close_folders(&mut self, cx: &mut Context<Self>) {
         self.model.collapse_all();
         cx.notify();
     }
@@ -676,9 +681,11 @@ impl KeyBrowser {
                 let menu = Self::row_menu(view.clone(), id, writable, can_delete);
                 let base = h_flex()
                     .id(ix)
+                    .w_full()
                     .h(px(ROW_HEIGHT))
                     .pl(px(8. + row.depth as f32 * INDENT))
-                    .pr_2()
+                    // Clear of the scrollbar, over the right of the row.
+                    .pr_4()
                     .gap_1p5()
                     .text_sm()
                     .cursor_pointer()

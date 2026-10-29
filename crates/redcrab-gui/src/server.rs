@@ -582,9 +582,9 @@ impl ServerView {
                                         .border_color(theme.border)
                                         .text_sm()
                                         .child(format!(
-                                            "db{} · {} keys · {} with TTL",
+                                            "db{} · {} · {} with TTL",
                                             db.db,
-                                            format::count(db.keys),
+                                            format::counted(db.keys, "key", "keys"),
                                             format::count(db.expires)
                                         ))
                                 })),
@@ -890,6 +890,7 @@ impl ServerView {
                                 if heading {
                                     h_flex()
                                         .id(ix)
+                                        .w_full()
                                         .h(px(ROW_HEIGHT))
                                         .px_3()
                                         .items_end()
@@ -1040,9 +1041,12 @@ fn header_row(columns: &[(&'static str, f32)], cx: &App) -> impl IntoElement + u
         }))
 }
 
+/// A row of a list: as wide as the list (uniform_list lays a row out at
+/// its content's width otherwise).
 fn row(ix: usize, border: Hsla) -> gpui_kit::Stateful<gpui_kit::Div> {
     h_flex()
         .id(ix)
+        .w_full()
         .h(px(ROW_HEIGHT))
         .px_3()
         .gap_2()
