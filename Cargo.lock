@@ -6522,7 +6522,7 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "redcrab-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6552,7 +6552,7 @@ dependencies = [
 
 [[package]]
 name = "redcrab-gui"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6572,7 +6572,7 @@ dependencies = [
 
 [[package]]
 name = "redcrab-tui"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
