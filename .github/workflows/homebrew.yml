@@ -121,7 +121,7 @@ jobs:
           fi
 
           brew install --cask muratmirgun/tap/redcrab
-          # Not notarized: a person opens it once by hand (the cask's caveats).
+          # Releases before 0.4.3 are not notarized; a quarantined one would not run.
           xattr -dr com.apple.quarantine /Applications/redcrab.app
           said=$(/Applications/redcrab.app/Contents/MacOS/redcrab --version)
           if [ "$said" != "redcrab $tapped" ]; then

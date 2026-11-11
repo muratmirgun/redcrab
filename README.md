@@ -124,11 +124,9 @@ updates with `brew upgrade`.
 <details>
 <summary>The first start, and checking a download</summary>
 
-- **macOS:** the app is not notarized yet, so macOS stops it the first time: open it
-  once, then **Open Anyway** in System Settings > Privacy & Security (on macOS 14 and
-  older, right-click redcrab.app > **Open**), or run
-  `xattr -dr com.apple.quarantine /Applications/redcrab.app`. A downloaded
-  `redcrab-tui` needs `xattr -d com.apple.quarantine redcrab-tui`; Homebrew's does not.
+- **macOS:** the app is signed and notarized by Apple from 0.4.3 on. The terminal app's
+  tarball is not notarized yet: a downloaded `redcrab-tui` needs
+  `xattr -d com.apple.quarantine redcrab-tui` (Homebrew's does not).
 - **Windows:** the executable is not code-signed yet; SmartScreen may say "Windows
   protected your PC": **More info**, then **Run anyway**.
 - **Linux:** drawing needs a Vulkan driver (`mesa-vulkan-drivers` on most systems). For

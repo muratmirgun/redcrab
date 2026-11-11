@@ -78,13 +78,6 @@ cask "redcrab" do
     "~/Library/Application Support/redcrab",
     "~/Library/Preferences/me.muratmirgun.redcrab.plist",
   ]
-
-  caveats <<~EOS
-    redcrab is not notarized yet, so macOS stops it the first time it opens.
-    Open it once, then choose Open Anyway in System Settings > Privacy & Security,
-    or run:
-      xattr -dr com.apple.quarantine /Applications/redcrab.app
-  EOS
 end
 EOF
 
