@@ -124,8 +124,13 @@ pub struct TlsConfig {
 impl TlsConfig {
     pub(crate) fn certificates(&self) -> Result<Option<redis::TlsCertificates>> {
         let read = |path: &Path, what: &str| {
-            std::fs::read(path)
-                .with_context(|| format!("could not read the {what} {}", path.display()))
+            std::fs::read(path).with_context(|| {
+                format!(
+                    "could not read the {what} {}{}",
+                    path.display(),
+                    crate::store::unreadable_hint()
+                )
+            })
         };
         let client_tls = match (&self.client_cert_file, &self.client_key_file) {
             (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {

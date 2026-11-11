@@ -17,12 +17,22 @@
 #   APPLE_NOTARY_ISSUER     its issuer id
 # With all three notary variables (and a signing identity) the disk image is
 # notarized and the ticket stapled to it.
+#
+# For the Mac App Store instead (see RELEASING.md), a sandboxed app that does
+# not update itself, in an installer package to upload:
+#   APP_STORE_PROFILE=redcrab_Mac_App_Store.provisionprofile scripts/package/macos.sh
+#                                                   # dist/redcrab-<version>-macos-appstore.pkg
+# signed with the "Apple Distribution" and "3rd Party Mac Developer Installer"
+# identities (APP_STORE_IDENTITY, APP_STORE_INSTALLER_IDENTITY to pick others).
 
 source "$(dirname "$0")/common.sh"
 
-BUNDLE_ID="io.github.muratmirgun.redcrab"
+BUNDLE_ID="me.muratmirgun.redcrab"
 # Apple Silicon starts at macOS 11; keep Intel builds on the same floor.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+
+# The App Store updates it; Apple does not let an app do that itself.
+[ -z "${APP_STORE_PROFILE:-}" ] || export REDCRAB_SELF_UPDATE=0
 
 read -r -a targets <<<"${TARGETS:-$(rustc -vV | sed -n 's/^host: //p')}"
 
@@ -86,6 +96,8 @@ cat >"$app/Contents/Info.plist" <<EOF
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>$VERSION</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
@@ -100,6 +112,52 @@ cat >"$app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 plutil -lint "$app/Contents/Info.plist" >&2
+
+if [ -n "${APP_STORE_PROFILE:-}" ]; then
+    # Before signing: an App Store signature runs only once Apple installs it.
+    answers_version "$app/Contents/MacOS/redcrab"
+    security cms -D -i "$APP_STORE_PROFILE" >"$WORK/profile.plist"
+    team=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$WORK/profile.plist")
+    app_id=$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' \
+        "$WORK/profile.plist")
+    if [ "$app_id" != "$team.$BUNDLE_ID" ]; then
+        echo "$APP_STORE_PROFILE is for $app_id, not $team.$BUNDLE_ID" >&2
+        exit 1
+    fi
+    cp "$APP_STORE_PROFILE" "$app/Contents/embedded.provisionprofile"
+    # Redis and SSH connections; the SSH tunnel's port on 127.0.0.1; the
+    # files picked in the connection form (store::keep_copy).
+    cat >"$WORK/redcrab.entitlements" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.application-identifier</key>
+    <string>$app_id</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>$team</string>
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.read-only</key>
+    <true/>
+</dict>
+</plist>
+EOF
+    codesign --force --timestamp --sign "${APP_STORE_IDENTITY:-Apple Distribution}" \
+        --entitlements "$WORK/redcrab.entitlements" "$app"
+    codesign --verify --strict --verbose=2 "$app"
+    codesign -d --entitlements - "$app" >&2
+    pkg="$DIST/redcrab-$VERSION-macos-appstore.pkg"
+    productbuild --component "$app" /Applications \
+        --sign "${APP_STORE_INSTALLER_IDENTITY:-3rd Party Mac Developer Installer}" "$pkg"
+    pkgutil --check-signature "$pkg" >&2
+    echo "$pkg"
+    exit 0
+fi
 
 identity="${APPLE_SIGNING_IDENTITY:-}"
 if [ -n "$identity" ]; then

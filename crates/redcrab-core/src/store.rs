@@ -112,6 +112,54 @@ pub fn save_connections(connections: &[ConnectionConfig]) -> Result<()> {
 
 /// Writes `value` as JSON to `path`, through a temporary file renamed over
 /// it, so that a crash never leaves half a file.
+/// Whether this copy runs in the macOS App Sandbox, as the Mac App Store build
+/// does: it can read a file outside its own directory only right after the
+/// person picks it, and cannot reach Unix sockets such as ssh-agent's.
+pub fn sandboxed() -> bool {
+    std::env::var_os("APP_SANDBOX_CONTAINER_ID").is_some()
+}
+
+/// What to add to "could not read <file>" in the sandbox.
+pub(crate) fn unreadable_hint() -> &'static str {
+    if sandboxed() {
+        " (choose it again with the folder button)"
+    } else {
+        ""
+    }
+}
+
+/// Copies a file the person picked (an SSH key, a TLS certificate) into
+/// redcrab's own directory and returns the copy, for the App Sandbox, where
+/// the original is unreadable after a restart.
+pub fn keep_copy(path: &Path) -> Result<PathBuf> {
+    keep_copy_in(&config_dir().context("no config directory")?, path)
+}
+
+// shortcut: copies stay when their connection is deleted; sweep unreferenced ones if that matters.
+fn keep_copy_in(dir: &Path, path: &Path) -> Result<PathBuf> {
+    let bytes = fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+    let name = path.file_name().context("not a file")?.to_string_lossy();
+    // Named by the contents: picking the same file again reuses its copy.
+    let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    let hex: String = digest.as_ref()[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = dir.join("files");
+    fs::create_dir_all(&dir)?;
+    let copy = dir.join(format!("{hex}-{name}"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        options.mode(0o600); // a private key stays this user's
+    }
+    std::io::Write::write_all(&mut options.open(&copy)?, &bytes)?;
+    Ok(copy)
+}
+
 pub(crate) fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -330,6 +378,46 @@ fn set_default_store() -> keyring_core::Result<()> {
 mod tests {
     use super::*;
     use crate::config::Environment;
+
+    #[test]
+    fn a_picked_file_is_kept_privately_by_its_contents() {
+        let dir = std::env::temp_dir().join(format!("redcrab-keep-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let picked = dir.join("id_ed25519");
+        fs::write(&picked, "key one").unwrap();
+
+        let copy = keep_copy_in(&dir, &picked).unwrap();
+        assert_eq!(fs::read_to_string(&copy).unwrap(), "key one");
+        assert!(copy.starts_with(dir.join("files")));
+        assert!(
+            copy.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-id_ed25519")
+        );
+        assert_eq!(
+            keep_copy_in(&dir, &picked).unwrap(),
+            copy,
+            "the same file, the same copy"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        fs::write(&picked, "key two").unwrap();
+        assert_ne!(
+            keep_copy_in(&dir, &picked).unwrap(),
+            copy,
+            "another key with the same name"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn remembers_connections_by_name() {

@@ -90,6 +90,28 @@ own. To sign locally, set `APPLE_SIGNING_IDENTITY` (and the `APPLE_NOTARY_*` var
 with `APPLE_NOTARY_KEY` as a path to the `.p8` file) before running
 `scripts/package/macos.sh`.
 
+## Mac App Store
+
+The App Store build is the same app, sandboxed and without the self-updater; the store
+updates it. It runs on Apple's terms: what the person picks in the connection form is
+copied into the app's own folder (it cannot read the original after a restart), and
+Unix sockets and ssh-agent are out of reach, so the form leaves them out.
+
+Once, on [developer.apple.com](https://developer.apple.com/account/resources): the
+App ID `me.muratmirgun.redcrab` (no capabilities), the **Apple Distribution** and
+**Mac Installer Distribution** certificates in the login keychain, and a **Mac App
+Store Connect** provisioning profile for that App ID. Then, for each version:
+
+```sh
+APP_STORE_PROFILE=redcrab_Mac_App_Store.provisionprofile \
+TARGETS="aarch64-apple-darwin x86_64-apple-darwin" scripts/package/macos.sh
+```
+
+and upload `dist/redcrab-<version>-macos-appstore.pkg` with Transporter (or
+`xcrun altool --upload-package`). Each upload needs a version App Store Connect has not
+seen; a rejected build is fixed in the next version. The privacy policy it links to is
+[`docs/privacy.md`](docs/privacy.md).
+
 ## Windows
 
 The executable carries the icon and version information (`crates/redcrab-gui/build.rs`)

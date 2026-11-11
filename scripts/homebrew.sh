@@ -76,7 +76,7 @@ cask "redcrab" do
 
   zap trash: [
     "~/Library/Application Support/redcrab",
-    "~/Library/Preferences/io.github.muratmirgun.redcrab.plist",
+    "~/Library/Preferences/me.muratmirgun.redcrab.plist",
   ]
 
   caveats <<~EOS

@@ -654,6 +654,12 @@ impl ConnectView {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
+            // In the sandbox the pick is readable only now: keep a copy.
+            let path = if store::sandboxed() {
+                store::keep_copy(&path).unwrap_or(path)
+            } else {
+                path
+            };
             this.update_in(cx, |this, window, cx| {
                 target.update(cx, |input, cx| {
                     input.set_value(path.display().to_string(), window, cx)
@@ -727,7 +733,7 @@ impl ConnectView {
             TopologyKind::Standalone => v_flex()
                 .gap_3()
                 // Where there are no Unix sockets, only so it can be turned off.
-                .when(UNIX_SOCKETS || self.choices.unix, |this| {
+                .when((UNIX_SOCKETS && !store::sandboxed()) || self.choices.unix, |this| {
                     this.child(
                         Checkbox::new("unix")
                             .label("Connect through a Unix socket")
@@ -924,7 +930,12 @@ impl ConnectView {
                 .child(
                     v_flex().gap_1().child(Label::new("Log in with").text_sm()).child(segmented(
                         "ssh-method",
-                        &SshMethod::ALL.map(|method| (method, method.label())),
+                        &SshMethod::ALL
+                            .into_iter()
+                            // ssh-agent's socket is out of the sandbox's reach.
+                            .filter(|m| *m != SshMethod::Agent || m == &method || !store::sandboxed())
+                            .map(|m| (m, m.label()))
+                            .collect::<Vec<_>>(),
                         method,
                         |form, method| form.ssh_method = method,
                         cx,

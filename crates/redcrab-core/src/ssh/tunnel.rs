@@ -457,8 +457,13 @@ fn accepted(methods: &[MethodKind]) -> String {
 /// directory.
 fn load_key(path: &Path, passphrase: Option<&str>) -> Result<keys::PrivateKey> {
     let path = expand_home(path);
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("could not read the SSH key file {}", path.display()))?;
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "could not read the SSH key file {}{}",
+            path.display(),
+            crate::store::unreadable_hint()
+        )
+    })?;
     let passphrase = passphrase.filter(|p| !p.is_empty());
     keys::decode_secret_key(&text, passphrase).map_err(|err| match (err, passphrase) {
         (keys::Error::KeyIsEncrypted, _) => anyhow!(
