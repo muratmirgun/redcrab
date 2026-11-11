@@ -103,6 +103,9 @@ jobs:
       # By full name, as the README says: Homebrew then trusts what it was
       # asked for by name, as it does for anyone installing from the tap.
       - name: Install them from the updated tap
+        env:
+          # The online audit asks GitHub's API; runners share the anonymous limit.
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           tapped=$(sed -n 's/^  version "\(.*\)"$/\1/p' tap/Casks/redcrab.rb)
           brew tap muratmirgun/tap "$GITHUB_WORKSPACE/tap"
