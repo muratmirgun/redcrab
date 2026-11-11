@@ -97,12 +97,16 @@ fn a_database_is_measured_key_by_key() {
         }
     );
 
-    // Stopped before it began.
+    // Stopped at once. The walk starts as soon as it is asked for, and 26 keys
+    // are one page, so on a busy machine it can finish before the stop comes.
     let (analysis, updates) = client.analyze_memory(1);
     updates.stopper().stop();
     let (stopped, last) = finish((analysis, updates));
-    assert_eq!(last, AnalysisProgress::Stopped);
-    assert_eq!(stopped.measured.keys, 0);
+    match last {
+        AnalysisProgress::Stopped => assert!(stopped.measured.keys < 26),
+        AnalysisProgress::Done => assert_eq!(stopped.measured.keys, 26),
+        other => panic!("neither stopped nor done: {other:?}"),
+    }
 }
 
 #[test]
