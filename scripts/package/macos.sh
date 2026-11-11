@@ -125,6 +125,8 @@ if [ -n "${APP_STORE_PROFILE:-}" ]; then
         exit 1
     fi
     cp "$APP_STORE_PROFILE" "$app/Contents/embedded.provisionprofile"
+    # A downloaded profile is quarantined, and the store refuses the attribute.
+    xattr -cr "$app"
     # Redis and SSH connections; the SSH tunnel's port on 127.0.0.1; the
     # files picked in the connection form (store::keep_copy).
     cat >"$WORK/redcrab.entitlements" <<EOF
