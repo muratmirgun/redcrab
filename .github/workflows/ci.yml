@@ -47,7 +47,7 @@ env:
 jobs:
   linux:
     name: Linux
-    runs-on: ubuntu-24.04
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-24.04' || 'redcrab-linux-arm64' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -145,7 +145,7 @@ jobs:
 
   macos:
     name: macOS
-    runs-on: macos-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'macos-latest' || 'redcrab-macos-arm64' }}
     timeout-minutes: 60
     env:
       # Code behind cfg(target_os = ...) is only compiled on its own platform,
