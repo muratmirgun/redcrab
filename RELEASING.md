@@ -109,8 +109,9 @@ TARGETS="aarch64-apple-darwin x86_64-apple-darwin" scripts/package/macos.sh
 
 and upload `dist/redcrab-<version>-macos-appstore.pkg` with Transporter (or
 `xcrun altool --upload-package`). Each upload needs a version App Store Connect has not
-seen; a rejected build is fixed in the next version. The privacy policy it links to is
-[`docs/privacy.md`](docs/privacy.md).
+seen; a rejected build is fixed in the next version. Its privacy policy and support URLs,
+https://redcrab.muratmirgun.me/privacy/ and /support/, are pages of the website on the
+`site` branch.
 
 ## Windows
 
