@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Support · redcrab</title>
+  <meta name="description" content="Help with redcrab, the Redis and Valkey client for the Mac: common questions and how to get in touch.">
+  <link rel="icon" href="/favicon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top wrap">
+    <a class="brand" href="/"><img src="/images/icon.png" alt="">redcrab</a>
+    <nav class="links">
+      <a href="/#features">Features</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/muratmirgun/redcrab">GitHub</a>
+    </nav>
+  </header>
+
+  <main class="page wrap narrow">
+    <h1>Support</h1>
+    <p class="updated">redcrab is made by one person in their spare time. Here is how to get help.</p>
+
+    <div class="cards">
+      <a class="card" href="https://github.com/muratmirgun/redcrab/issues/new"><h3>Report a problem</h3><p>Something broken or confusing? Open an issue.</p></a>
+      <a class="card" href="https://github.com/muratmirgun/redcrab/issues"><h3>Ask for a feature</h3><p>Or see whether someone already has.</p></a>
+      <a class="card" href="https://github.com/muratmirgun/redcrab/blob/main/docs/guide.md"><h3>Read the guide</h3><p>Every view, setting and shortcut.</p></a>
+    </div>
+
+    <p>When you report a problem, say which version you have (the last line of the menu with <strong>Settings…</strong>), your macOS version, the server (Redis or Valkey, its version, standalone, cluster or sentinel) and what you did. Leave out passwords, host names and data you would not want public: issues are visible to everyone.</p>
+
+    <h2>Common questions</h2>
+
+    <h3>redcrab cannot connect to my server.</h3>
+    <p>Check that the host and port are reachable from your Mac, for example with <code>redis-cli -h host -p port PING</code>. A server that needs TLS needs <strong>TLS</strong> turned on in the connection; one behind a bastion needs an <strong>SSH tunnel</strong>. Cloud databases often allow only listed IP addresses. The error redcrab shows names the step that failed. More in <a href="https://github.com/muratmirgun/redcrab/blob/main/docs/connections.md">Connections</a>.</p>
+
+    <h3>It says it cannot read my SSH key or certificate.</h3>
+    <p>The Mac App Store version can only read files you pick yourself. Choose the file again with the folder button next to the field; redcrab keeps a private copy so it can read it next time.</p>
+
+    <h3>Where is my SSH agent, or the Unix socket option?</h3>
+    <p>The Mac App Store version runs in Apple's sandbox, which keeps it from reaching <code>ssh-agent</code> and local socket files. Use a key file for SSH and a host and port for the server, or use the version from <a href="https://github.com/muratmirgun/redcrab/releases/latest">GitHub</a>, which has both.</p>
+
+    <h3>Where are my connections and passwords kept?</h3>
+    <p>Connections are saved on your Mac in redcrab's own folder; passwords and passphrases in the macOS Keychain, under "redcrab". Nothing is sent anywhere. See the <a href="/privacy/">privacy policy</a> and <a href="https://github.com/muratmirgun/redcrab/blob/main/docs/security.md">what redcrab keeps on disk</a>.</p>
+
+    <h3>How do I update?</h3>
+    <p>The Mac App Store updates its copy. A copy from GitHub looks for a new release once a day and asks before installing it, after checking it against redcrab's own signing key. Homebrew users can also run <code>brew upgrade</code>.</p>
+
+    <h3>Can I open a database read-only?</h3>
+    <p>Yes. Turn on <strong>Read-only</strong> in the connection: redcrab then refuses every command that writes, in the browser and in the console alike.</p>
+
+    <h2>Security issues</h2>
+    <p>Please do not report a security problem in a public issue. Use <a href="https://github.com/muratmirgun/redcrab/security/advisories/new">GitHub's private vulnerability reporting</a> instead.</p>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>© 2026 Murat Mirgün Ercan</span>
+      <nav><a href="/support/">Support</a><a href="/privacy/">Privacy</a><a href="https://github.com/muratmirgun/redcrab">GitHub</a></nav>
+    </div>
+  </footer>
+</body>
+</html>

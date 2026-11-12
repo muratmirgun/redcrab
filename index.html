@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>redcrab: a fast, native Redis and Valkey client</title>
+  <meta name="description" content="redcrab is a fast, native Redis and Valkey client for the Mac, written in Rust. Browse millions of keys, edit every type, run commands, watch the server. Free and open source.">
+  <meta property="og:title" content="redcrab">
+  <meta property="og:description" content="A fast, native Redis and Valkey client for your Mac.">
+  <meta property="og:image" content="https://redcrab.muratmirgun.me/images/keys-dark.png">
+  <link rel="icon" href="/favicon.png">
+  <link rel="apple-touch-icon" href="/images/icon.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top wrap">
+    <a class="brand" href="/"><img src="/images/icon.png" alt="">redcrab</a>
+    <nav class="links">
+      <a href="#features">Features</a>
+      <a href="/support/">Support</a>
+      <a href="https://github.com/muratmirgun/redcrab">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero wrap">
+      <img class="icon" src="/images/icon.png" alt="redcrab's icon: a crab whose shell is a stack of database disks">
+      <h1>redcrab</h1>
+      <p class="tagline">A fast, native Redis and Valkey client for your Mac.</p>
+      <p class="lede">Browse millions of keys, edit every type, run commands and watch your servers, in an app drawn by the GPU. No Electron, no web view.</p>
+      <div class="cta">
+        <!-- When the App Store page is live, add it here as the primary button. -->
+        <a class="button primary" href="https://github.com/muratmirgun/redcrab/releases/latest">Download for Mac</a>
+        <a class="button" href="https://github.com/muratmirgun/redcrab">Source on GitHub</a>
+      </div>
+      <p class="fine">Free and open source. Or with Homebrew: <code>brew install --cask muratmirgun/tap/redcrab</code><br>
+        Requires macOS 11 or later, on Apple silicon or Intel. Coming soon to the Mac App Store.</p>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/images/keys-dark.png">
+        <img class="shot hero-shot" src="/images/keys-light.png" width="1280" height="800" alt="redcrab showing a JSON document, with the key tree on the left">
+      </picture>
+    </div>
+
+    <section id="features">
+      <div class="wrap">
+        <div class="feature">
+          <div>
+            <div class="kicker">Keys</div>
+            <h2>Instant on millions of keys.</h2>
+            <p>Keys stream in with <code>SCAN</code>, never <code>KEYS *</code>, into a folder tree split on <code>:</code>. Only the rows on screen are drawn. Strings, hashes, lists, sets, sorted sets, streams and JSON are paged however big they are, and edited in place.</p>
+          </div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="/images/palette-dark.png">
+            <img class="shot" src="/images/palette-light.png" width="1280" height="800" loading="lazy" alt="The command palette over the key browser">
+          </picture>
+        </div>
+
+        <div class="feature flip">
+          <div>
+            <div class="kicker">Console</div>
+            <h2>A real console.</h2>
+            <p>A connection of its own, history, and completion of every command and its options, with the rest of the syntax greyed out as you type. <kbd>⌘J</kbd> opens it anywhere.</p>
+          </div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="/images/console-dark.png">
+            <img class="shot" src="/images/console-light.png" width="1280" height="800" loading="lazy" alt="The console with command completion">
+          </picture>
+        </div>
+
+        <div class="feature">
+          <div>
+            <div class="kicker">Server</div>
+            <h2>Watch the server.</h2>
+            <p>Ops per second, memory, clients and hit rate as they change. The slow log, the connected clients, and <code>INFO</code>, all a keystroke away.</p>
+          </div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="/images/server-dark.png">
+            <img class="shot" src="/images/server-light.png" width="1280" height="800" loading="lazy" alt="The server overview with live charts">
+          </picture>
+        </div>
+
+        <div class="feature flip">
+          <div>
+            <div class="kicker">Memory</div>
+            <h2>See what takes the memory.</h2>
+            <p>By type, by key prefix, and the hundred biggest keys. Measure every key, or a sample of a huge database, and stop whenever you like.</p>
+          </div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="/images/memory-dark.png">
+            <img class="shot" src="/images/memory-light.png" width="1280" height="800" loading="lazy" alt="The memory analysis by type and by key prefix">
+          </picture>
+        </div>
+
+        <div class="feature">
+          <div>
+            <div class="kicker">Pub/Sub</div>
+            <h2>Listen in.</h2>
+            <p>Subscribe to channels and patterns, publish messages, and watch every command the server runs with <code>MONITOR</code>.</p>
+          </div>
+          <picture>
+            <source media="(prefers-color-scheme: dark)" srcset="/images/pubsub-dark.png">
+            <img class="shot" src="/images/pubsub-light.png" width="1280" height="800" loading="lazy" alt="Pub/Sub messages arriving on a pattern and a channel">
+          </picture>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>Everything around it.</h2>
+        <p class="section-lede">Small things that make a client you can leave open all day.</p>
+        <div class="grid">
+          <div><h3>Any way in</h3><p>Standalone, Cluster and Sentinel. TLS and mutual TLS, SSH tunnels. Redis 6 and later, and Valkey.</p></div>
+          <div><h3>Careful with production</h3><p>Read-only connections enforced in the core, colored environment tags, and edits that never overwrite a value that changed meanwhile.</p></div>
+          <div><h3>Passwords in the Keychain</h3><p>Connections are saved on your Mac; passwords and passphrases go to the macOS Keychain, never to a file.</p></div>
+          <div><h3>Values, decoded</h3><p>Text, JSON, hex, or decoded from Base64, MessagePack and gzip, and saved back the way they came.</p></div>
+          <div><h3>Keyboard first</h3><p><kbd>⌘K</kbd> opens a palette of everything the window can do, by name, with its shortcut.</p></div>
+          <div><h3>Native and light</h3><p>Written in Rust and drawn by the GPU. It starts at once and stays small, however many keys you open.</p></div>
+          <div><h3>Light and dark</h3><p>Follows your Mac's appearance, or pick one.</p></div>
+          <div><h3>Nothing collected</h3><p>No account, no analytics, no tracking. It talks only to the servers you set up.</p></div>
+          <div><h3>Open source</h3><p>MIT or Apache-2.0. Read it, build it, send a fix.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>In the terminal, too.</h2>
+        <p class="section-lede"><code>redcrab-tui</code> is the same app for a server you reach over SSH: the same saved connections and views, with vim keys. <code>brew install muratmirgun/tap/redcrab-tui</code></p>
+        <img class="shot" src="/images/tui-keys.svg" width="1280" loading="lazy" alt="redcrab-tui showing a hash, the key tree and the console in a terminal">
+      </div>
+    </section>
+
+    <section id="support">
+      <div class="wrap">
+        <h2>Help and support.</h2>
+        <p class="section-lede">redcrab is made by one person in their spare time. Most answers are in the guide.</p>
+        <div class="cards">
+          <a class="card" href="https://github.com/muratmirgun/redcrab/blob/main/docs/guide.md"><h3>Guide</h3><p>Connecting, editing, the console, the server tools and every shortcut.</p></a>
+          <a class="card" href="/support/"><h3>Support</h3><p>Common questions, and how to report a problem or ask for a feature.</p></a>
+          <a class="card" href="/privacy/"><h3>Privacy</h3><p>redcrab collects nothing. The short version, and the long one.</p></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>© 2026 Murat Mirgün Ercan. Redis is a trademark of Redis Ltd.; redcrab is not affiliated with it.</span>
+      <nav><a href="/support/">Support</a><a href="/privacy/">Privacy</a><a href="https://github.com/muratmirgun/redcrab">GitHub</a></nav>
+    </div>
+  </footer>
+</body>
+</html>
